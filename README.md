@@ -19,13 +19,31 @@ Er wordt alleen gekopieerd: op de oude pc wordt niets verwijderd.
 
 Alles komt in één map, `Migratie_<pc>_<datum>`, met een `rapport.html` en uitleg in `HERSTELLEN.txt`.
 
-## Gebruik
+## Snel starten
 
-Op de oude pc, met een externe schijf of NAS-share als doel:
+Open PowerShell op de oude pc (gewoon, niet als administrator) en plak:
+
+```powershell
+irm https://github.com/xam464/windows-migratie-script/releases/latest/download/start.ps1 | iex
+```
+
+Met opties, bijvoorbeeld de grafische dialogen:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/xam464/windows-migratie-script/releases/latest/download/start.ps1))) -Gui
+```
+
+`start.ps1` is een kleine starter: die downloadt `Migratie-Assistent.ps1` uit de nieuwste release en
+start het met Windows PowerShell. Je kunt het script ook zelf downloaden en starten:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Migratie-Assistent.ps1
 ```
+
+Administratorrechten zijn niet nodig. Het script werkt met de bestanden en instellingen van de
+gebruiker die het start, dus start het als de gebruiker wiens gegevens je wilt meenemen.
+
+## Opties
 
 | Optie | Wat het doet |
 |---|---|
@@ -65,6 +83,21 @@ openSUSE en Arch.
 
 - Windows 10 of 11 met Windows PowerShell 5.1 (standaard aanwezig)
 - Optioneel: `winget` (App Installer) en 7-Zip; het script biedt aan 7-Zip te installeren
+
+## Waarom er geen handtekening op zit
+
+De execution policy van Windows controleert alleen scriptbestanden die je start. Met `irm | iex`
+voer je tekst uit, en de starter start het script met `-ExecutionPolicy Bypass`. Een handtekening
+(Authenticode) is daarom niet nodig. Dit is dezelfde manier waarop bijvoorbeeld
+[winutil](https://github.com/ChrisTitusTech/winutil) wordt gestart.
+
+Let wel: `irm | iex` voert uit wat er op dat adres staat. Bekijk het script gerust eerst op GitHub.
+
+## Een nieuwe versie uitbrengen
+
+Maak op GitHub een release aan (bijvoorbeeld `v0.2.0`). De workflow in `.github/workflows/release.yml`
+controleert de scripts en hangt `Migratie-Assistent.ps1` en `start.ps1` aan de release. De link
+`releases/latest/download/start.ps1` wijst daarna vanzelf naar die versie.
 
 ## Status
 

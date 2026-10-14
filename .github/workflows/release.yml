@@ -1,0 +1,39 @@
+# Bij elke gepubliceerde release: de scripts controleren en als bestanden aan de release hangen,
+# zodat .../releases/latest/download/start.ps1 altijd naar de nieuwste versie wijst.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  bestanden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Controleren
+        shell: pwsh
+        run: |
+          foreach ($f in 'Migratie-Assistent.ps1', 'start.ps1') {
+              $fouten = $null
+              [System.Management.Automation.Language.Parser]::ParseFile("$PWD/$f", [ref]$null, [ref]$fouten) | Out-Null
+              if ($fouten) { $fouten | Out-String | Write-Host; throw "$f bevat parsefouten" }
+          }
+          # Windows PowerShell 5.1 leest een bestand zonder BOM als ANSI; dan breken de ë en ï
+          $b = [IO.File]::ReadAllBytes("$PWD/Migratie-Assistent.ps1")
+          if (-not ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)) {
+              throw 'Migratie-Assistent.ps1 mist de UTF-8 BOM'
+          }
+          # irm | iex leest de starter zonder tekenset, dus alleen ASCII
+          if ([IO.File]::ReadAllBytes("$PWD/start.ps1") | Where-Object { $_ -gt 127 }) {
+              throw 'start.ps1 moet puur ASCII zijn'
+          }
+
+      - name: Aan de release hangen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" Migratie-Assistent.ps1 start.ps1 --clobber
