@@ -361,10 +361,13 @@ function Select-Items {
     return @($Items | Where-Object { $nrs -contains $_.Nr })
 }
 
-# Telt bestanden en bytes recursief; slaat junctions/symlinks en cloud-placeholders over
+# Telt bestanden en bytes recursief. Junctions en symbolische koppelingen worden overgeslagen (anders
+# kan de telling rondjes lopen); OneDrive-mappen en -bestanden zijn ook reparse points, maar tellen
+# wel mee. OnlineBytes: bestanden die alleen in de cloud staan en bij het kopiëren gedownload worden.
 function Measure-Map([string]$Pad, [long]$GrootDrempel = 100MB) {
     $bytes = 0L
     $aantal = 0L
+    $online = 0L
     $groot = New-Object System.Collections.Generic.List[object]
     $stapel = New-Object System.Collections.Generic.Stack[string]
     $stapel.Push($Pad)
@@ -372,10 +375,16 @@ function Measure-Map([string]$Pad, [long]$GrootDrempel = 100MB) {
         $dir = $stapel.Pop()
         try {
             foreach ($i in ([IO.DirectoryInfo]::new($dir)).EnumerateFileSystemInfos()) {
-                if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-                if ($i -is [IO.DirectoryInfo]) { $stapel.Push($i.FullName); continue }
+                if ($i -is [IO.DirectoryInfo]) {
+                    if (($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                        (Get-Item -LiteralPath $i.FullName -Force -ErrorAction SilentlyContinue).LinkType) { continue }
+                    $stapel.Push($i.FullName)
+                    continue
+                }
                 $aantal++
                 $bytes += $i.Length
+                # FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS (0x400000): alleen online
+                if ([int]$i.Attributes -band 0x400000) { $online += $i.Length }
                 if ($i.Length -ge $GrootDrempel) {
                     $groot.Add([pscustomobject]@{ Pad = $i.FullName; Bytes = $i.Length; Grootte = (Format-Grootte $i.Length) })
                 }
@@ -384,7 +393,7 @@ function Measure-Map([string]$Pad, [long]$GrootDrempel = 100MB) {
             # Geen toegang of map verdwenen: overslaan
         }
     }
-    return [pscustomobject]@{ Bytes = $bytes; Bestanden = $aantal; Groot = $groot }
+    return [pscustomobject]@{ Bytes = $bytes; Bestanden = $aantal; OnlineBytes = $online; Groot = $groot }
 }
 
 # Vraagt om een programma af te sluiten als het draait. Geeft $true als het (nu) dicht is.
@@ -404,7 +413,7 @@ function Confirm-Gesloten([string]$Naam, [string]$Proces) {
 # robocopy met vaste opties. Extra komt direct na bron en doel, dus een bestandsfilter (*.pst) mag
 # vooraan staan. Geeft de exitcode terug: 0-7 is gelukt, 8 en hoger betekent fouten.
 function Invoke-Robocopy([string]$Bron, [string]$Doel, [string[]]$Extra = @(), [string]$Log) {
-    $a = @($Bron, $Doel) + $Extra + @('/R:1', '/W:1', '/XJ', '/NP', '/NDL')
+    $a = @($Bron, $Doel) + $Extra + @('/R:1', '/W:1', '/XJD', '/NP', '/NDL')
     if ($Log) { $a += "/LOG+:$Log" } else { $a += @('/NFL', '/NJH', '/NJS') }
     & robocopy @a | Out-Null
     return $LASTEXITCODE
@@ -634,7 +643,7 @@ function Backup-Browsers {
 
         foreach ($p in Get-ChildItem -LiteralPath $ffProfielen -Directory) {
             $doelMap = Join-Path $ffDoel $p.Name
-            & robocopy $p.FullName $doelMap /E /R:1 /W:1 /XJ /NP /NFL /NDL /NJH /NJS `
+            & robocopy $p.FullName $doelMap /E /R:1 /W:1 /XJD /NP /NFL /NDL /NJH /NJS `
                 /XD cache2 crashes minidumps datareporting saved-telemetry-pings | Out-Null
             if ($LASTEXITCODE -ge 8) { Write-Let "Firefox / $($p.Name): niet alles gekopieerd (robocopy-code $LASTEXITCODE)" }
 
@@ -855,6 +864,11 @@ function Backup-Instellingen {
 # Home-map
 # ---------------------------------------------------------------------------
 
+# Het echte pad van een vaste map (Desktop, MyDocuments, ...), ook als die omgeleid is
+function Get-BekendePad([string]$Naam) { return [Environment]::GetFolderPath($Naam) }
+
+function Format-Online([long]$Bytes) { if ($Bytes -gt 0) { "$(Format-Grootte $Bytes) alleen online" } else { '' } }
+
 function Invoke-HomeScan {
     Write-Kop "Home-map scannen: $env:USERPROFILE"
     $cloud = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial) | Where-Object { $_ }
@@ -884,13 +898,44 @@ function Invoke-HomeScan {
             Map          = $d.Name
             GrootteTekst = Format-Grootte $meting.Bytes
             Bestanden    = $meting.Bestanden
+            Online       = Format-Online $meting.OnlineBytes
             Advies       = $advies
             Type         = $type
             Bytes        = $meting.Bytes
+            OnlineBytes  = $meting.OnlineBytes
             Pad          = $d.FullName
         })
     }
     Write-Progress -Activity 'Home-map scannen' -Completed
+
+    # Vaste mappen die omgeleid zijn, meestal naar OneDrive door 'OneDrive-back-up'. Die staan dan niet
+    # in de home-map maar horen er wel bij. Ze krijgen de standaardnaam (Desktop, Documents, ...), zodat
+    # het herstellen ze op de nieuwe pc naar het bureaublad of Documenten terugzet.
+    foreach ($naam in 'Desktop', 'Documents', 'Pictures', 'Music', 'Videos') {
+        $pad = Get-BekendePad $script:BekendeMappen[$naam]
+        if (-not $pad -or $pad -eq (Join-Path $env:USERPROFILE $naam) -or -not (Test-Path -LiteralPath $pad)) { continue }
+
+        $meting = Measure-Map $pad
+        foreach ($g in $meting.Groot) { $grootste.Add($g) }
+        Write-Ok "$naam staat in $pad; neem ik mee als '$naam'"
+
+        # Wat er nog in de home-map onder dezelfde naam staat, is meestal een lege restmap
+        $rest = $resultaat | Where-Object { $_.Map -eq $naam } | Select-Object -First 1
+        if ($rest) {
+            if ($rest.Bestanden -eq 0) { [void]$resultaat.Remove($rest) } else { $rest.Map = "$naam (home-map)" }
+        }
+        $resultaat.Add([pscustomobject]@{
+            Map          = $naam
+            GrootteTekst = Format-Grootte $meting.Bytes
+            Bestanden    = $meting.Bestanden
+            Online       = Format-Online $meting.OnlineBytes
+            Advies       = if ($meting.Bestanden) { 'Kopiëren' } else { 'Overslaan (leeg)' }
+            Type         = 'Omgeleid'
+            Bytes        = $meting.Bytes
+            OnlineBytes  = $meting.OnlineBytes
+            Pad          = $pad
+        })
+    }
 
     # Losse bestanden direct in de home-map (bijv. .gitconfig), zonder het gebruikersregister
     $los = @(Get-ChildItem -LiteralPath $env:USERPROFILE -File -Force -ErrorAction SilentlyContinue |
@@ -904,6 +949,7 @@ function Invoke-HomeScan {
             Advies       = 'Kopiëren'
             Type         = 'Losse bestanden'
             Bytes        = [long]$som
+            OnlineBytes  = 0L
             Pad          = $env:USERPROFILE
         })
     }
@@ -912,7 +958,7 @@ function Invoke-HomeScan {
     $script:Rapport.Home = $script:Scan
     $script:Rapport.Grootste = @($grootste | Sort-Object Bytes -Descending | Select-Object -First 20)
 
-    $script:Scan | Format-Table Map, GrootteTekst, Bestanden, Advies -AutoSize | Out-Host
+    $script:Scan | Format-Table Map, GrootteTekst, Bestanden, Online, Advies -AutoSize | Out-Host
     $totaal = ($script:Scan | Measure-Object Bytes -Sum).Sum
     $voorstel = ($script:Scan | Where-Object { $_.Advies -eq 'Kopiëren' } | Measure-Object Bytes -Sum).Sum
     Write-Host "  Totaal: $(Format-Grootte $totaal), waarvan voorgesteld om te kopiëren: $(Format-Grootte $voorstel)"
@@ -922,14 +968,6 @@ function Invoke-HomeScan {
         Write-Host '  Grootste bestanden (>= 100 MB):'
         $script:Rapport.Grootste | Select-Object -First 10 | Format-Table Grootte, Pad -AutoSize | Out-Host
     }
-
-    # Bekende mappen die naar elders zijn omgeleid (bijv. OneDrive-back-up van Bureaublad/Documenten)
-    foreach ($kf in 'Desktop', 'MyDocuments', 'MyPictures') {
-        $pad = [Environment]::GetFolderPath($kf)
-        if ($pad -and (Split-Path $pad -Parent) -ne $env:USERPROFILE) {
-            Write-Let "$kf is omgeleid naar $pad"
-        }
-    }
 }
 
 function Copy-HomeMappen {
@@ -938,11 +976,15 @@ function Copy-HomeMappen {
     Write-Kop 'Home-map kopiëren'
 
     $keuze = @(Select-Items -Items $script:Scan -Titel 'Welke mappen kopiëren?' `
-        -Kolommen @('Map', 'GrootteTekst', 'Bestanden', 'Advies') -Voorstel { $_.Advies -eq 'Kopiëren' })
+        -Kolommen @('Map', 'GrootteTekst', 'Bestanden', 'Online', 'Advies') -Voorstel { $_.Advies -eq 'Kopiëren' })
     if (-not $keuze) { Write-Let 'Niets gekozen.'; return }
 
     if ($keuze | Where-Object { $_.Type -eq 'Cloud' }) {
         Write-Let 'Je hebt OneDrive gekozen: bestanden die alleen in de cloud staan worden nu eerst gedownload.'
+    }
+    $online = [long](($keuze | Measure-Object OnlineBytes -Sum).Sum)
+    if ($online -gt 0) {
+        Write-Let "$(Format-Grootte $online) staat alleen online (OneDrive) en wordt nu eerst gedownload; dat kan even duren."
     }
 
     $nodig = ($keuze | Measure-Object Bytes -Sum).Sum
@@ -971,7 +1013,8 @@ function Copy-HomeMappen {
             $dst = Join-Path $doelBasis $m.Map
             $rcArgs = @($m.Pad, $dst, '/E')
         }
-        $rcArgs += @('/COPY:DAT', '/DCOPY:T', '/R:1', '/W:1', '/XJ', '/MT:8', '/NP', '/NDL', "/LOG+:$log")
+        # /XJD i.p.v. /XJ: alleen gekoppelde mappen overslaan; OneDrive-bestanden zijn ook reparse points
+        $rcArgs += @('/COPY:DAT', '/DCOPY:T', '/R:1', '/W:1', '/XJD', '/MT:8', '/NP', '/NDL', "/LOG+:$log")
         & robocopy @rcArgs | Out-Null
         $code = $LASTEXITCODE
 
@@ -1016,7 +1059,7 @@ function Save-Rapport {
            'td,th{border:1px solid #ccc;padding:4px 8px;text-align:left;vertical-align:top}th{background:#eee}h2{margin-top:1.5em}</style>'
     $delen = @("<h1>Migratierapport $($R.Computer)</h1><p>$($R.Gebruiker) &middot; $($R.Windows) &middot; $($R.Datum)</p>")
     if ($R.Kopieen)    { $delen += $R.Kopieen | ConvertTo-Html -Fragment -PreContent '<h2>Gekopieerd</h2>' }
-    if ($R.Home)       { $delen += $R.Home | Select-Object Map, GrootteTekst, Bestanden, Advies, Pad | ConvertTo-Html -Fragment -PreContent '<h2>Home-map</h2>' }
+    if ($R.Home)       { $delen += $R.Home | Select-Object Map, GrootteTekst, Bestanden, Online, Advies, Pad | ConvertTo-Html -Fragment -PreContent '<h2>Home-map</h2>' }
     if ($R.Grootste)   { $delen += $R.Grootste | Select-Object Grootte, Pad | ConvertTo-Html -Fragment -PreContent '<h2>Grootste bestanden</h2>' }
     if ($R.Browsers)   { $delen += $R.Browsers | ConvertTo-Html -Fragment -PreContent '<h2>Browsers</h2>' }
     if ($R.Instellingen) { $delen += $R.Instellingen | ConvertTo-Html -Fragment -PreContent '<h2>Programma-instellingen</h2>' }
@@ -1972,7 +2015,7 @@ function Restore-Browsers {
 function Get-HerstelDoel([string]$Map) {
     if ($Map -eq '_losse_bestanden') { return $env:USERPROFILE }
     if ($script:BekendeMappen[$Map]) {
-        $p = [Environment]::GetFolderPath($script:BekendeMappen[$Map])
+        $p = Get-BekendePad $script:BekendeMappen[$Map]
         if ($p) { return $p }
     }
     return Join-Path $env:USERPROFILE $Map

@@ -18,7 +18,8 @@ Er wordt alleen gekopieerd: op de oude pc wordt niets verwijderd.
   (versleutelde) wachtwoorden. Ook een eigen databasemap wordt gevonden. Op de nieuwe pc werkt alles
   weer na het terugzetten; alleen de licentie moet je opnieuw activeren.
 - **Home-map**: een scan (grootte, aantal bestanden, grootste bestanden) en een kopie met robocopy,
-  met een controle achteraf.
+  met een controle achteraf. Staan je bureaublad, Documenten of Afbeeldingen in OneDrive (OneDrive-back-up),
+  dan gaan die ook mee, en bij het herstellen komen ze weer op het bureaublad of in Documenten terecht.
 
 Alles komt in één map, `Migratie_<pc>_<datum>`, met een `rapport.html` en uitleg in `HERSTELLEN.txt`.
 
