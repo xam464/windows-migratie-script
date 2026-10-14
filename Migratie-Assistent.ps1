@@ -95,9 +95,12 @@ $script:Instellingen = @(
 
 # Mappen in de back-up (Home\<naam>) die op de nieuwe laptop naar een bekende map horen;
 # die kan omgeleid zijn, bijvoorbeeld naar OneDrive
+# (ook onder de Nederlandse naam, voor wie een map zelf in de back-up heeft gezet)
 $script:BekendeMappen = @{
     Desktop = 'Desktop'; Documents = 'MyDocuments'; Pictures = 'MyPictures'
     Music = 'MyMusic'; Videos = 'MyVideos'; Favorites = 'Favorites'
+    Bureaublad = 'Desktop'; Documenten = 'MyDocuments'; Afbeeldingen = 'MyPictures'
+    Muziek = 'MyMusic'; "Video's" = 'MyVideos'
 }
 
 # Windows-programma -> Linux. Patroon is een regex op de programmanaam; Id is de Flatpak-ID op
@@ -524,11 +527,12 @@ function Get-ChromiumExtensies([string]$ProfielPad) {
             foreach ($taal in $talen) {
                 $msgPad = Join-Path $versie.FullName "_locales\$taal\messages.json"
                 if (-not (Test-Path -LiteralPath $msgPad)) { continue }
-                try {
-                    $msgs = Get-Content -LiteralPath $msgPad -Raw -Encoding UTF8 | ConvertFrom-Json
-                    $hit = $msgs.PSObject.Properties | Where-Object { $_.Name -ieq $sleutel } | Select-Object -First 1
-                    if ($hit) { $naam = $hit.Value.message; break }
-                } catch { }
+                # Geen ConvertFrom-Json: dat weigert in 5.1 bestanden met sleutels die alleen in
+                # hoofdletters verschillen, en die komen in extensies van Google voor
+                $tekst = Get-Content -LiteralPath $msgPad -Raw -Encoding UTF8
+                $patroon = '"' + [regex]::Escape($sleutel) + '"\s*:\s*\{[^}]*?"message"\s*:\s*"((?:[^"\\]|\\.)*)"'
+                $hit = [regex]::Match($tekst, $patroon, 'IgnoreCase')
+                if ($hit.Success) { $naam = [regex]::Unescape($hit.Groups[1].Value); break }
             }
         }
         [pscustomobject]@{
@@ -876,7 +880,7 @@ function Invoke-HomeScan {
     $grootste = New-Object System.Collections.Generic.List[object]
 
     $mappen = @(Get-ChildItem -LiteralPath $env:USERPROFILE -Directory -Force -ErrorAction SilentlyContinue |
-        Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+        Where-Object { -not $_.LinkType })   # junctions zoals 'Application Data' niet; OneDrive (ook een reparse point) wel
 
     $i = 0
     foreach ($d in $mappen) {
@@ -1210,8 +1214,8 @@ kopieer() {
 xdg_doel() {
     local k p=''
     case "$1" in
-        Desktop) k=DESKTOP ;; Documents) k=DOCUMENTS ;; Downloads) k=DOWNLOAD ;;
-        Music) k=MUSIC ;; Pictures) k=PICTURES ;; Videos) k=VIDEOS ;;
+        Desktop | Bureaublad) k=DESKTOP ;; Documents | Documenten) k=DOCUMENTS ;; Downloads) k=DOWNLOAD ;;
+        Music | Muziek) k=MUSIC ;; Pictures | Afbeeldingen) k=PICTURES ;; Videos | "Video's") k=VIDEOS ;;
         _losse_bestanden) echo "$HOME"; return ;;
         *) echo "$HOME/$1"; return ;;
     esac

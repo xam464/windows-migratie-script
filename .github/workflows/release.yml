@@ -33,7 +33,20 @@ jobs:
               throw 'start.ps1 moet puur ASCII zijn'
           }
 
+      # Het Linux-herstelscript zit in Migratie-Assistent.ps1; los erbij zodat je op Linux altijd de
+      # nieuwste versie kunt draaien, ook met een oudere back-up
+      - name: Linux-herstelscript los zetten
+        shell: pwsh
+        run: |
+          $tekst = Get-Content -LiteralPath Migratie-Assistent.ps1 -Raw
+          $m = [regex]::Match($tekst, '(?s)\$script:LinuxHerstelScript = @''\r?\n(.*?)\r?\n''@')
+          if (-not $m.Success) { throw 'LinuxHerstelScript niet gevonden in Migratie-Assistent.ps1' }
+          $sh = ($m.Groups[1].Value -replace "`r`n", "`n") + "`n"
+          [IO.File]::WriteAllText("$PWD/herstel-linux.sh", $sh, (New-Object System.Text.UTF8Encoding $false))
+          bash -n herstel-linux.sh
+          if ($LASTEXITCODE) { throw 'herstel-linux.sh bevat syntaxfouten' }
+
       - name: Aan de release hangen
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" Migratie-Assistent.ps1 start.ps1 --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" Migratie-Assistent.ps1 start.ps1 herstel-linux.sh --clobber

@@ -78,6 +78,12 @@ Op de Linux-pc, in de back-upmap (niet met `sudo`):
 bash Linux/herstel-linux.sh
 ```
 
+Of altijd de nieuwste versie van het herstelscript, ook bij een oudere back-up:
+
+```bash
+bash <(curl -fsSL https://github.com/xam464/windows-migratie-script/releases/latest/download/herstel-linux.sh) /pad/naar/Migratie_<pc>_<datum>
+```
+
 Dit installeert de programma's via Flatpak, zet instellingen, bladwijzers, het Firefox- en
 Thunderbird-profiel en je bestanden terug (`Documents` gaat naar `~/Documenten`, enzovoort), en pakt de
 wachtwoorden alleen in het geheugen uit om ze te importeren. Het werkt op Ubuntu, Mint, Debian, Fedora,
