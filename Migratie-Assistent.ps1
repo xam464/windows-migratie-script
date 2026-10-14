@@ -1081,6 +1081,7 @@ NIEUWE COMPUTER MET LINUX
 1. Sluit deze schijf aan op de Linux-pc (NTFS en exFAT kan Linux gewoon lezen) of koppel de NAS-share.
 2. Open een terminal in deze map en start:
        bash Linux/herstel-linux.sh
+   Of geef de map mee:  bash herstel-linux.sh /pad/naar/deze/map
    Niet met sudo; het script vraagt zelf om je wachtwoord als het iets moet installeren.
 3. Het script:
    - installeert de Linux-versies van je programma's via Flathub (Linux/apps.tsv);
@@ -1100,13 +1101,15 @@ $script:LinuxHerstelScript = @'
 # Migratie-assistent: herstellen op Linux.
 # Gemaakt door Migratie-Assistent.ps1 op de oude Windows-pc. Start het vanuit de back-upmap:
 #     bash Linux/herstel-linux.sh
+# of geef de back-upmap mee:  bash herstel-linux.sh /media/usb/Migratie_OUDEPC_20261014_0930
 # Werkt op Ubuntu/Mint/Debian, Fedora, openSUSE en Arch. Programma's komen van Flathub (Flatpak),
 # zodat het niet uitmaakt welke distributie je gebruikt.
 set -u
 shopt -s dotglob    # ook verborgen mappen zoals Home/.ssh
 
-HIER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP="$(dirname "$HIER")"
+HIER="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+BACKUP=''    # wordt bij de start bepaald, zie zoek_backup
+LINUX=''
 LOGMAP="${XDG_STATE_HOME:-$HOME/.local/state}/migratie-assistent"
 mkdir -p "$LOGMAP"
 LOG="$LOGMAP/herstel_$(date +%Y%m%d_%H%M).log"
@@ -1277,7 +1280,7 @@ mozilla_herstel() {
 
 stap_apps() {
     kop "Programma's installeren (Flathub)"
-    local tsv="$HIER/apps.tsv"
+    local tsv="$LINUX/apps.tsv"
     if [[ -s "$tsv" ]]; then
         if ! command -v flatpak >/dev/null; then
             waarsch 'Flatpak is niet geïnstalleerd.'
@@ -1310,10 +1313,10 @@ stap_apps() {
     else
         waarsch 'Geen apps.tsv in de back-up.'
     fi
-    if [[ -s "$HIER/zelf-zoeken.txt" ]]; then
+    if [[ -s "$LINUX/zelf-zoeken.txt" ]]; then
         echo
         echo "  Hiervoor is geen vaste Linux-versie bekend:"
-        sed 's/^/    /' "$HIER/zelf-zoeken.txt"
+        sed 's/^/    /' "$LINUX/zelf-zoeken.txt"
     fi
 }
 
@@ -1490,7 +1493,7 @@ stap_browsers() {
 
 stap_ssh() {
     kop 'SSH-sessies (uit PuTTY en WinSCP)'
-    local cfg="$HIER/ssh-config.txt" doel="$HOME/.ssh/config"
+    local cfg="$LINUX/ssh-config.txt" doel="$HOME/.ssh/config"
     [[ -s "$cfg" ]] || { waarsch 'Geen PuTTY- of WinSCP-sessies in deze back-up.'; return; }
     sed 's/^/    /' "$cfg"
     if [[ -f "$doel" ]] && grep -q '^# --- Migratie-assistent' "$doel"; then
@@ -1507,8 +1510,12 @@ stap_ssh() {
 
 stap_bestanden() {
     kop 'Bestanden terugzetten'
-    local thuis="$BACKUP/Home"
-    [[ -d "$thuis" ]] || { waarsch 'Geen bestanden uit de home-map in deze back-up.'; return; }
+    local thuis
+    thuis="$(find "$BACKUP" -maxdepth 1 -type d -iname home -print -quit)"
+    if [[ -z "$thuis" ]]; then
+        waarsch "Geen map Home in $BACKUP. Is de stap 'Home-map kopiëren' op de oude pc gedaan?"
+        return
+    fi
     local args=() d naam aan k doel
     for d in "$thuis"/*/; do
         [[ -d "$d" ]] || continue
@@ -1517,7 +1524,7 @@ stap_bestanden() {
         case "$naam" in Favorites | Links | Searches | Contacts | 'Saved Games' | '3D Objects') aan=OFF ;; *) aan=ON ;; esac
         args+=("$naam" "-> $(xdg_doel "$naam")" "$aan")
     done
-    ((${#args[@]})) || { waarsch 'Geen bestanden uit de home-map in deze back-up.'; return; }
+    ((${#args[@]})) || { waarsch "De map $thuis bevat geen mappen om terug te zetten."; return; }
     echo '  Er wordt niets verwijderd. Bestanden die hier al staan en nieuwer zijn, blijven staan.'
     kies 'Welke mappen terugzetten?' "${args[@]}"
     ((${#KEUZE[@]})) || return
@@ -1592,12 +1599,32 @@ alles() {
 # Start
 # ---------------------------------------------------------------------------
 
+# De back-upmap: een map met HERSTELLEN.txt of rapport.json. Gezocht wordt in het meegegeven pad, de
+# map boven Linux/ waar dit script normaal staat, en de huidige map; anders vraagt het script ernaar.
+is_backup() { [[ -n "$1" && ( -f "$1/HERSTELLEN.txt" || -f "$1/rapport.json" ) ]]; }
+zoek_backup() {
+    local k
+    for k in "${1:-}" "$(dirname "$HIER")" "$HIER" "$PWD" "$(dirname "$PWD")"; do
+        is_backup "$k" && { BACKUP="$(cd -- "$k" >/dev/null && pwd)"; break; }
+    done
+    while [[ -z "$BACKUP" ]]; do
+        waarsch "Geen back-upmap gevonden (gezocht bij $HIER en $PWD)."
+        read -r -e -p '  Pad naar de back-upmap (Migratie_<pc>_<datum>), leeg = stoppen: ' k || exit 1
+        [[ -z "$k" ]] && exit 1
+        k="${k/#\~/$HOME}"
+        if is_backup "$k"; then BACKUP="$(cd -- "$k" >/dev/null && pwd)"
+        else fout "In $k staat geen HERSTELLEN.txt of rapport.json."; fi
+    done
+    LINUX="$BACKUP/Linux"
+}
+
 [[ "$(uname -s)" == Linux ]] || waarsch 'Dit script is bedoeld voor Linux.'
 if ((EUID == 0)); then
     fout 'Start dit script als jezelf, niet met sudo: anders komt alles in de map van root terecht.'
     exit 1
 fi
 
+zoek_backup "${1:-}"
 pc="$(sed -n 's/.*"Computer": *"\([^"]*\)".*/\1/p' "$BACKUP/rapport.json" 2>/dev/null | head -1)"
 while true; do
     printf '\n\e[36m  ==== Migratie-assistent: herstellen op Linux ====\e[0m\n'
