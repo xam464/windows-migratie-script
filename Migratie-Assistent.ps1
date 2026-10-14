@@ -81,6 +81,10 @@ $script:Instellingen = @(
     @{ Naam = 'Notepad++';              Soort = 'Map';         Pad = '%APPDATA%\Notepad++';             Proces = 'notepad++' }
     @{ Naam = 'VS Code';                Soort = 'Map';         Pad = '%APPDATA%\Code\User';             Proces = 'code'; Uitsluiten = @('workspaceStorage', 'History') }
     @{ Naam = 'Thunderbird';            Soort = 'Map';         Pad = '%APPDATA%\Thunderbird';           Proces = 'thunderbird' }
+    # eM Client: de hele database. Accounts, serverinstellingen en de (versleutelde) wachtwoorden
+    # staan daarin en werken na terugzetten op een andere pc. Zoek: een eigen databasemap.
+    @{ Naam = 'eM Client';              Soort = 'Map';         Pad = '%APPDATA%\eM Client';             Proces = 'MailClient'
+       Zoek = { Get-EmClientMap }; Vervangen = $true; MoetDicht = $true }
     @{ Naam = 'FileZilla';              Soort = 'Map';         Pad = '%APPDATA%\FileZilla';             Proces = 'filezilla' }
     @{ Naam = 'Windows Terminal';       Soort = 'Map';         Pad = '%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState' }
     @{ Naam = 'Sticky Notes';           Soort = 'Map';         Pad = '%LOCALAPPDATA%\Packages\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe\LocalState'; Proces = 'Microsoft.Notes' }
@@ -108,6 +112,7 @@ $script:LinuxApps = @(
     @{ Patroon = '^Vivaldi';                       Id = 'com.vivaldi.Vivaldi';          Naam = 'Vivaldi';           Cmd = 'vivaldi' }
     @{ Patroon = '^Opera';                         Id = 'com.opera.Opera';              Naam = 'Opera';             Cmd = 'opera' }
     @{ Patroon = 'Thunderbird';                    Id = 'org.mozilla.Thunderbird';      Naam = 'Thunderbird';       Cmd = 'thunderbird' }
+    @{ Patroon = '^eM Client';                     Id = 'org.mozilla.Thunderbird';      Naam = 'Thunderbird (alternatief)'; Cmd = 'thunderbird'; Opm = 'eM Client bestaat niet voor Linux' }
     @{ Patroon = 'Microsoft (Office|365)';         Id = 'org.libreoffice.LibreOffice';  Naam = 'LibreOffice (alternatief)'; Cmd = 'libreoffice'; Opm = 'Of Office online via office.com' }
     @{ Patroon = 'Teams';                          Id = 'com.github.IsmaelMartinez.teams_for_linux'; Naam = 'Teams for Linux (onofficieel)'; Opm = 'Of teams.microsoft.com in de browser' }
     @{ Patroon = '^Zoom';                          Id = 'us.zoom.Zoom';                 Naam = 'Zoom' }
@@ -742,6 +747,16 @@ function Export-Wachtwoorden {
 # Programma-instellingen (AppData en register)
 # ---------------------------------------------------------------------------
 
+# Databasemap van eM Client: een eigen locatie (Instellingen > Algemeen > Opslag) staat in het
+# register; de Microsoft Store-versie leest en schrijft in zijn eigen pakketmap
+function Get-EmClientMap {
+    $eigen = (Get-ItemProperty -LiteralPath 'HKCU:\SOFTWARE\eM Client' -ErrorAction SilentlyContinue).DBLocation
+    $kandidaten = @($eigen, (Join-Path $env:APPDATA 'eM Client')) +
+        @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Packages\*eM*Client*\LocalCache\Roaming\eM Client') `
+            -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    return $kandidaten | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+}
+
 function Backup-Instellingen {
     $run = Get-RunMap
     Write-Kop 'Programma-instellingen'
@@ -754,8 +769,8 @@ function Backup-Instellingen {
             $grootte = '-'
             $bytes = 0L
         } else {
-            $pad = [Environment]::ExpandEnvironmentVariables($d.Pad)
-            if (-not (Test-Path -LiteralPath $pad)) { continue }
+            $pad = if ($d.Zoek) { & $d.Zoek } else { [Environment]::ExpandEnvironmentVariables($d.Pad) }
+            if (-not $pad -or -not (Test-Path -LiteralPath $pad)) { continue }
             if ($d.Filter) {
                 $bytes = [long]((Get-ChildItem -LiteralPath $pad -Filter $d.Filter -File -ErrorAction SilentlyContinue |
                     Measure-Object Length -Sum).Sum)
@@ -765,7 +780,8 @@ function Backup-Instellingen {
             if ($bytes -eq 0) { continue }
             $grootte = Format-Grootte $bytes
         }
-        [pscustomobject]@{ Naam = $d.Naam; Grootte = $grootte; Bytes = $bytes; Pad = $d.Pad; Definitie = $d }
+        $bronPad = if ($d.Soort -eq 'Register') { $d.Pad } else { $pad }
+        [pscustomobject]@{ Naam = $d.Naam; Grootte = $grootte; Bytes = $bytes; Pad = $bronPad; Definitie = $d }
     }
     $gevonden = @($gevonden)
     if (-not $gevonden) { Write-Let 'Geen bekende programma-instellingen gevonden.'; return }
@@ -779,7 +795,11 @@ function Backup-Instellingen {
     foreach ($k in $keuze) {
         $d = $k.Definitie
         $doelMap = Join-Path $basis $d.Naam
-        if (-not (Confirm-Gesloten $d.Naam $d.Proces)) { Write-Let "$($d.Naam): wordt toch gekopieerd; vergrendelde bestanden ontbreken misschien." }
+        if (-not (Confirm-Gesloten $d.Naam $d.Proces)) {
+            # Een database die tijdens het kopiëren verandert, is op de nieuwe pc mogelijk kapot
+            if ($d.MoetDicht) { Write-Fout "$($d.Naam): overgeslagen, het programma draait nog."; continue }
+            Write-Let "$($d.Naam): wordt toch gekopieerd; vergrendelde bestanden ontbreken misschien."
+        }
 
         $ok = $true
         switch ($d.Soort) {
@@ -789,7 +809,7 @@ function Backup-Instellingen {
                 $ok = $LASTEXITCODE -eq 0
             }
             default {
-                $bron = [Environment]::ExpandEnvironmentVariables($d.Pad)
+                $bron = $k.Pad
                 $extra = @(if ($d.Filter) { $d.Filter } else { '/E' })
                 if ($d.Uitsluiten) { $extra += @('/XD') + $d.Uitsluiten }
                 $ok = (Invoke-Robocopy $bron $doelMap $extra $log) -lt 8
@@ -810,10 +830,13 @@ function Backup-Instellingen {
             Pad    = $d.Pad
             Filter = $d.Filter
             Proces = $d.Proces
+            Vervangen = [bool]$d.Vervangen
             Status = if ($ok) { 'OK' } else { 'Fouten' }
         })
     }
 
+    if ($manifest.Count -eq 0) { Write-Let 'Er is niets gekopieerd.'; return }
+    New-Item -ItemType Directory -Force -Path $basis | Out-Null
     # -InputObject: anders wordt een lijst met één item in 5.1 geen JSON-array
     ConvertTo-Json -InputObject @($manifest.ToArray()) -Depth 3 |
         Set-Content -LiteralPath (Join-Path $basis 'instellingen.json') -Encoding UTF8
@@ -821,6 +844,10 @@ function Backup-Instellingen {
 
     if ($keuze | Where-Object { $_.Naam -eq 'FileZilla' }) {
         Write-Let 'FileZilla bewaart wachtwoorden van sites vrijwel leesbaar (base64) in sitemanager.xml. Bewaar de back-up veilig.'
+    }
+    if ($manifest | Where-Object { $_.Naam -eq 'eM Client' -and $_.Status -eq 'OK' }) {
+        Write-Let 'eM Client: je mail en de opgeslagen accountwachtwoorden staan nu in de back-up. Bewaar die veilig (bijv. een BitLocker-schijf).'
+        Write-Host '       Op de nieuwe pc: eerst het herstel doen, daarna pas eM Client starten. Activeer daar je licentie opnieuw (Menu > Help > Licentie).'
     }
 }
 
@@ -1322,6 +1349,9 @@ instelling() {
                 Office-woordenlijsten) echo '  CUSTOM.DIC is een tekstbestand met je eigen woorden.' ;;
             esac
             ;;
+        'eM Client')
+            [[ $modus == uitleg ]] && { echo '- geen Linux-versie; zie uitleg bij Thunderbird'; return; }
+            ;;
         'PuTTY-sessies' | 'WinSCP-sessies')
             [[ $modus == uitleg ]] && { echo '- staat omgezet in de stap SSH-sessies'; return; }
             ;;
@@ -1346,6 +1376,18 @@ stap_instellingen() {
     echo '  Installeer de programma'"'"'s eerst (stap 2) en start Thunderbird één keer.'
     kies 'Welke instellingen terugzetten?' "${args[@]}"
     for naam in "${KEUZE[@]}"; do instelling herstel "$naam"; done
+
+    if [[ -d "$basis/eM Client" ]]; then
+        echo
+        waarsch 'eM Client bestaat niet voor Linux; de database blijft in de back-up (voor een Windows- of Mac-pc).'
+        cat <<'UITLEG'
+  Overstappen naar Thunderbird:
+   - Voeg je accounts toe met je e-mailadres en wachtwoord; Thunderbird zoekt de servers zelf op.
+     Je mail via IMAP of Exchange staat op de server en komt vanzelf terug.
+   - Mail in lokale mappen van eM Client: exporteer die op de oude pc in eM Client
+     (Menu > Exporteren > E-mails naar .eml) en importeer ze in Thunderbird met de add-on ImportExportTools NG.
+UITLEG
+    fi
 }
 
 chromium_bladwijzers() {  # BROWSER PROFIEL
@@ -1747,7 +1789,13 @@ function Restore-Instellingen {
         $map = Join-Path $basis $i.Naam
         if (-not (Test-Path -LiteralPath $map)) { continue }
         $doel = if ($i.Soort -eq 'Register') { $i.Pad } else { [Environment]::ExpandEnvironmentVariables($i.Pad) }
-        [pscustomobject]@{ Naam = $i.Naam; Naar = $doel; Soort = $i.Soort; Proces = $i.Proces; Filter = $i.Filter; Map = $map }
+        if ($i.Naam -eq 'eM Client') {
+            # Heeft eM Client op deze pc een eigen databasemap, dan leest het alleen daaruit
+            $eigen = (Get-ItemProperty -LiteralPath 'HKCU:\SOFTWARE\eM Client' -ErrorAction SilentlyContinue).DBLocation
+            if ($eigen) { $doel = $eigen }
+        }
+        [pscustomobject]@{ Naam = $i.Naam; Naar = $doel; Soort = $i.Soort; Proces = $i.Proces; Filter = $i.Filter
+            Vervangen = [bool]$i.Vervangen; Map = $map }
     })
     if (-not $lijst) { Write-Let 'Geen programma-instellingen in deze back-up.'; return }
 
@@ -1775,10 +1823,19 @@ function Restore-Instellingen {
                 Write-Ok "$($k.Naam): $n lettertypen geïnstalleerd"
             }
             default {
+                # Een database niet mengen met een (lege) database die hier al is aangemaakt
+                if ($k.Vervangen -and (Get-ChildItem -LiteralPath $k.Naar -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+                    $opzij = '{0}.voor-migratie-{1}' -f (Split-Path $k.Naar -Leaf), (Get-Date -Format 'yyyyMMdd_HHmm')
+                    Rename-Item -LiteralPath $k.Naar -NewName $opzij
+                    Write-Let "$($k.Naam): wat hier al stond is hernoemd naar $opzij"
+                }
                 $extra = @(if ($k.Filter) { $k.Filter } else { '/E' })
                 $code = Invoke-Robocopy $k.Map $k.Naar $extra $script:HerstelLog
                 if ($code -lt 8) { Write-Ok "$($k.Naam): teruggezet naar $($k.Naar)" }
                 else { Write-Fout "$($k.Naam): fouten bij kopiëren (robocopy $code), zie $script:HerstelLog" }
+                if ($k.Naam -eq 'eM Client' -and $code -lt 8) {
+                    Write-Host '       Start eM Client en activeer je licentie opnieuw (Menu > Help > Licentie).'
+                }
             }
         }
     }

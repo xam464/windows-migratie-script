@@ -14,6 +14,9 @@ Er wordt alleen gekopieerd: op de oude pc wordt niets verwijderd.
 - **Wachtwoorden**: een begeleide export uit de browser, daarna versleuteld met 7-Zip (AES-256).
 - **Programma-instellingen**: Outlook (handtekeningen en PST-bestanden), Office-sjablonen, VS Code,
   Notepad++, Thunderbird, FileZilla, Windows Terminal, Sticky Notes, eigen lettertypen, PuTTY en WinSCP.
+- **eM Client**: de hele database, met accounts, serverinstellingen, mail en de opgeslagen
+  (versleutelde) wachtwoorden. Ook een eigen databasemap wordt gevonden. Op de nieuwe pc werkt alles
+  weer na het terugzetten; alleen de licentie moet je opnieuw activeren.
 - **Home-map**: een scan (grootte, aantal bestanden, grootste bestanden) en een kopie met robocopy,
   met een controle achteraf.
 
