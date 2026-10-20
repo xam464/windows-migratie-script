@@ -11,7 +11,7 @@ Er wordt alleen gekopieerd: op de oude pc wordt niets verwijderd.
   opnieuw te installeren.
 - **Browsers** (Chrome, Edge, Brave, Vivaldi, Opera, Firefox): bladwijzers (ook als HTML), instellingen en
   een lijst van extensies. Firefox gaat als heel profiel mee.
-- **Wachtwoorden**: een begeleide export uit de browser, daarna versleuteld met 7-Zip (AES-256).
+- **Wachtwoorden**: een begeleide export uit de browser, daarna desgewenst versleuteld met 7-Zip (AES-256).
 - **Programma-instellingen**: Outlook (handtekeningen en PST-bestanden), Office-sjablonen, VS Code,
   Notepad++, Thunderbird, FileZilla, Windows Terminal, Sticky Notes, eigen lettertypen, PuTTY en WinSCP.
 - **eM Client**: de hele database, met accounts, serverinstellingen, mail en de opgeslagen
