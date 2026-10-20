@@ -224,6 +224,10 @@ $script:WachtwoordUitleg = @'
   gebonden is (DPAPI, en bij Chrome/Edge sinds 2024 ook 'app-bound encryption'). Alleen de
   bestanden kopiëren werkt op de nieuwe laptop dus niet: je exporteert via de browser zelf naar CSV.
 
+  Het script probeert dat exporteren voor je te automatiseren: het opent de pagina en klikt zelf
+  door. Jij hoeft alleen nog je pincode of wachtwoord in te vullen bij de Windows-prompt. Lukt het
+  automatisch klikken niet (andere browserversie of taal), dan verschijnen de handmatige stappen.
+
   Let op: zo'n CSV bevat al je wachtwoorden in leesbare tekst. Dit script versleutelt hem daarna
   met 7-Zip (AES-256) en verwijdert het origineel.
   Tip: een wachtwoordmanager (Bitwarden/Vaultwarden, KeePassXC) kan zo'n CSV direct importeren.
@@ -723,6 +727,144 @@ function Protect-Wachtwoorden([string]$Map) {
     }
 }
 
+# UI Automation-namen van de knoppen in de Chromium-wachtwoordpagina. Deze verschillen per
+# browserversie en per taal; pas ze hier aan als het automatisch klikken niet aanslaat. Lukt het
+# niet, dan valt Export-Wachtwoorden vanzelf terug op de handmatige stappen.
+$script:UiaNamen = @{
+    Meer         = '(?i)meer acties|more actions'
+    Export       = '(?i)wachtwoorden exporteren|export passwords'
+    Opslaan      = '(?i)^\s*(opslaan|save|bewaren)\s*$'
+    Bestandsnaam = '(?i)bestandsnaam|file name'
+}
+
+# Zoekt binnen $Root naar het eerste zichtbare element van een van de gevraagde controletypen
+# waarvan de naam op $Regex past. Blijft tot $TimeoutMs proberen, zodat trage pagina's meekomen.
+function script:Uia-Find {
+    param($Root, [System.Windows.Automation.ControlType[]]$Types, [string]$Regex, [int]$TimeoutMs = 8000)
+    $conds = foreach ($t in $Types) {
+        New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $t)
+    }
+    $cond = if (@($conds).Count -eq 1) { $conds } else { New-Object System.Windows.Automation.OrCondition($conds) }
+    $deadline = [DateTime]::Now.AddMilliseconds($TimeoutMs)
+    do {
+        try {
+            foreach ($e in $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+                if ($e.Current.Name -match $Regex) { return $e }
+            }
+        } catch {}
+        Start-Sleep -Milliseconds 350
+    } while ([DateTime]::Now -lt $deadline)
+    return $null
+}
+
+# Klikt/opent een element: eerst via Invoke (knoppen), anders via Expand (uitklapmenu's).
+function script:Uia-Klik($E) {
+    if (-not $E) { return $false }
+    try { $E.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch {}
+    try { $E.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand(); return $true } catch {}
+    return $false
+}
+
+# Alle open browservensters (Chromium deelt deze vensterklasse).
+function script:Uia-Vensters {
+    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+    $c = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Chrome_WidgetWin_1')
+    return @($desktop.FindAll([System.Windows.Automation.TreeScope]::Children, $c))
+}
+
+# Kiest de browservensters waarin gezocht mag worden, zodat een ander open Chromium-venster niet
+# per ongeluk aangeklikt wordt. Eerst het venster van het proces dat we net startten; anders het
+# voorgrondvenster (als dat een Chromium-venster is); als laatste redmiddel alle Chromium-vensters.
+function script:Uia-DoelVensters($Proc) {
+    $alle = Uia-Vensters
+    try {
+        if ($Proc -and -not $Proc.HasExited) {
+            $Proc.Refresh()
+            $h = $Proc.MainWindowHandle
+            if ($h -ne [IntPtr]::Zero) {
+                $el = [System.Windows.Automation.AutomationElement]::FromHandle($h)
+                if ($el) { return @($el) }
+            }
+        }
+    } catch {}
+    try {
+        if (-not ('Uia.Win' -as [type])) {
+            Add-Type -Namespace Uia -Name Win -MemberDefinition `
+                '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();'
+        }
+        $fg = [Uia.Win]::GetForegroundWindow()
+        foreach ($w in $alle) {
+            if ([IntPtr]$w.Current.NativeWindowHandle -eq $fg) { return @($w) }
+        }
+    } catch {}
+    return $alle
+}
+
+# Wacht tot een dialoogvenster met de gevraagde vensterklasse verschijnt (bijv. het opslagvenster).
+function script:Uia-Dialoog([string]$ClassName, [int]$TimeoutMs) {
+    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+    $c = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ClassNameProperty, $ClassName)
+    $deadline = [DateTime]::Now.AddMilliseconds($TimeoutMs)
+    do {
+        try { $d = $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $c); if ($d) { return $d } } catch {}
+        Start-Sleep -Milliseconds 400
+    } while ([DateTime]::Now -lt $deadline)
+    return $null
+}
+
+# Stuurt via UI Automation de wachtwoord-export van een Chromium-browser aan. De gebruiker hoeft
+# alleen nog zijn pincode in te vullen bij de Windows-beveiligingsprompt. Geeft $true terug als de
+# CSV er daadwerkelijk staat; $false betekent: terugvallen op de handmatige stappen.
+function Invoke-ChromiumExport {
+    param([hashtable]$B, [string]$Csv, $Proc)
+    try { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction Stop } catch { return $false }
+    $btnMi = @([System.Windows.Automation.ControlType]::Button, [System.Windows.Automation.ControlType]::MenuItem)
+    $doel = Uia-DoelVensters $Proc
+
+    # 1. Het 'Exporteren'-menu-item vinden (eventueel eerst het 'meer acties'-menu uitklappen).
+    $export = $null
+    foreach ($w in $doel) { $export = Uia-Find $w $btnMi $script:UiaNamen.Export 3000; if ($export) { break } }
+    if (-not $export) {
+        foreach ($w in $doel) {
+            $meer = Uia-Find $w $btnMi $script:UiaNamen.Meer 2500
+            if ($meer) { [void](Uia-Klik $meer); Start-Sleep -Milliseconds 600; break }
+        }
+        foreach ($w in $doel) { $export = Uia-Find $w $btnMi $script:UiaNamen.Export 3000; if ($export) { break } }
+    }
+    if (-not $export) { return $false }
+    [void](Uia-Klik $export)
+    Start-Sleep -Milliseconds 800
+
+    # 2. De bevestigingsknop 'Exporteren' in de dialoog (zelfde naam) aanklikken.
+    foreach ($w in $doel) {
+        $bevestig = Uia-Find $w @([System.Windows.Automation.ControlType]::Button) $script:UiaNamen.Export 3000
+        if ($bevestig) { [void](Uia-Klik $bevestig); break }
+    }
+
+    # 3. Windows Hello: hier vult de gebruiker zelf zijn pincode of wachtwoord in.
+    Write-Host '  >> Vul nu je pincode of wachtwoord in bij de Windows-beveiligingsprompt.' -ForegroundColor Yellow
+
+    # 4. Wachten op het opslagvenster en het volledige pad invullen, daarna opslaan.
+    $dlg = Uia-Dialoog '#32770' 120000
+    if (-not $dlg) { return (Test-Path -LiteralPath $Csv) }
+    $edit = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Edit) $script:UiaNamen.Bestandsnaam 5000
+    if (-not $edit) { $edit = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Edit) '.' 3000 }
+    if ($edit) {
+        try { $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($Csv) } catch {}
+    }
+    Start-Sleep -Milliseconds 300
+    $opslaan = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Button) $script:UiaNamen.Opslaan 4000
+    if ($opslaan) { [void](Uia-Klik $opslaan) }
+
+    # 5. Wachten tot het bestand er echt staat.
+    $deadline = [DateTime]::Now.AddSeconds(20)
+    while ([DateTime]::Now -lt $deadline -and -not (Test-Path -LiteralPath $Csv)) { Start-Sleep -Milliseconds 400 }
+    return (Test-Path -LiteralPath $Csv)
+}
+
 function Export-Wachtwoorden {
     $run = Get-RunMap
     $map = Join-Path $run 'Wachtwoorden'
@@ -735,15 +877,27 @@ function Export-Wachtwoorden {
         if (-not (Read-JaNee "Wachtwoorden exporteren uit $($b.Naam)?")) { continue }
 
         $csv = Join-Path $map "$($b.Naam)-wachtwoorden.csv"
-        Set-Clipboard -Value $b.Ww
-        try { Start-Process -FilePath $b.Proces -ArgumentList $b.Ww } catch { Write-Let "Kon $($b.Naam) niet starten; open hem zelf." }
-        Write-Host "  1. Het adres $($b.Ww) staat op je klembord. Plak het in de adresbalk als de pagina niet vanzelf opent."
-        Write-Host "  2. Kies 'Wachtwoorden exporteren/downloaden' en bevestig met je Windows-pincode of -wachtwoord."
-        [void](Read-Host '  3. Druk op Enter zodra het venster om op te slaan open is')
-        Set-Clipboard -Value $csv
-        Write-Host '  4. Het opslagpad staat nu op je klembord. Plak het in het veld voor de bestandsnaam:'
-        Write-Host "     $csv" -ForegroundColor White
-        [void](Read-Host '  5. Druk op Enter als het bestand is opgeslagen')
+        $proc = $null
+        try { $proc = Start-Process -FilePath $b.Proces -ArgumentList $b.Ww -PassThru }
+        catch { Write-Let "Kon $($b.Naam) niet starten; open hem zelf."; Set-Clipboard -Value $b.Ww }
+        Write-Host "  $($b.Naam) wordt geopend. Ik probeer het exporteren automatisch te starten..."
+        Start-Sleep -Seconds 4
+
+        $gelukt = $false
+        try { $gelukt = Invoke-ChromiumExport -B $b -Csv $csv -Proc $proc } catch { $gelukt = $false }
+
+        if (-not $gelukt -and -not (Test-Path -LiteralPath $csv)) {
+            # Automatisch klikken sloeg niet aan (andere versie/taal): terug naar de handmatige stappen.
+            Write-Let 'Automatisch starten lukte niet; doe de export even met de hand:'
+            Set-Clipboard -Value $b.Ww
+            Write-Host "  1. Het adres $($b.Ww) staat op je klembord. Plak het in de adresbalk als de pagina niet vanzelf opent."
+            Write-Host "  2. Kies 'Wachtwoorden exporteren/downloaden' en bevestig met je Windows-pincode of -wachtwoord."
+            [void](Read-Host '  3. Druk op Enter zodra het venster om op te slaan open is')
+            Set-Clipboard -Value $csv
+            Write-Host '  4. Het opslagpad staat nu op je klembord. Plak het in het veld voor de bestandsnaam:'
+            Write-Host "     $csv" -ForegroundColor White
+            [void](Read-Host '  5. Druk op Enter als het bestand is opgeslagen')
+        }
 
         if (Test-Path -LiteralPath $csv) { Write-Ok "$($b.Naam): opgeslagen" }
         else { Write-Let "$($b.Naam): $csv niet gevonden. Heb je een andere naam of map gekozen? Zet het bestand dan zelf in $map." }
