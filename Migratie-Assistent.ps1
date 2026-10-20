@@ -2438,8 +2438,11 @@ function Restore-Wachtwoorden {
     # één vraag per browser, ook als er meerdere bestanden voor zijn
     $perBrowser = [ordered]@{}
     $zonderBrowser = @()
+    $nietAanwezig = @()
     foreach ($csv in $uniek) {
-        $b = $browsers | Where-Object { $csv.Name -match [regex]::Escape($_.Naam) } | Select-Object -First 1
+        $herkomst = $script:Chromium | Where-Object { $csv.Name -match [regex]::Escape($_.Naam) } | Select-Object -First 1
+        $b = $browsers | Where-Object { $herkomst -and $_.Naam -eq $herkomst.Naam } | Select-Object -First 1
+        if ($herkomst -and -not $b) { $nietAanwezig += [pscustomobject]@{ Csv = $csv; Van = $herkomst.Naam }; continue }
         if (-not $b) { $zonderBrowser += $csv; continue }
         if (-not $perBrowser.Contains($b.Naam)) { $perBrowser[$b.Naam] = @{ B = $b; Csvs = @() } }
         $perBrowser[$b.Naam].Csvs += $csv
@@ -2448,6 +2451,15 @@ function Restore-Wachtwoorden {
         $namen = ($groep.Csvs | ForEach-Object { $_.Name }) -join ', '
         if (-not (Read-JaNee "Wachtwoorden uit $namen importeren in $($groep.B.Naam)?")) { continue }
         foreach ($csv in $groep.Csvs) { Import-WachtwoordCsv $groep.B $csv }
+    }
+    # Bestanden uit een browser die hier (nog) niet staat: dat eerst zeggen, dan pas een andere browser aanbieden
+    foreach ($n in $nietAanwezig) {
+        Write-Let "$($n.Csv.Name) komt uit $($n.Van), maar $($n.Van) staat niet op deze laptop. Installeer $($n.Van) eerst (stap Programma's) en draai deze stap opnieuw om ze daar te importeren."
+        foreach ($b in $browsers) {
+            if (-not (Read-JaNee "De wachtwoorden uit $($n.Van) toch importeren in $($b.Naam)?")) { continue }
+            Import-WachtwoordCsv $b $n.Csv
+            break
+        }
     }
     # Bestanden zonder herkenbare browsernaam: per browser vragen
     foreach ($csv in $zonderBrowser) {
