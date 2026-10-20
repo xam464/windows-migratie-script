@@ -53,13 +53,13 @@ $ErrorActionPreference = 'Stop'
 # Configuratie
 # ---------------------------------------------------------------------------
 
-# Chromium-browsers: waar de gebruikersdata staat en waar de wachtwoord-export zit
+# Chromium-browsers: waar de gebruikersdata staat, waar de wachtwoord-export zit en het winget-pakket
 $script:Chromium = @(
-    @{ Naam = 'Chrome';  Proces = 'chrome';  Data = "$env:LOCALAPPDATA\Google\Chrome\User Data";               Ww = 'chrome://password-manager/settings' }
-    @{ Naam = 'Edge';    Proces = 'msedge';  Data = "$env:LOCALAPPDATA\Microsoft\Edge\User Data";              Ww = 'edge://settings/autofill/passwords' }
-    @{ Naam = 'Brave';   Proces = 'brave';   Data = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"; Ww = 'brave://password-manager/settings' }
-    @{ Naam = 'Vivaldi'; Proces = 'vivaldi'; Data = "$env:LOCALAPPDATA\Vivaldi\User Data";                     Ww = 'vivaldi://settings/passwords' }
-    @{ Naam = 'Opera';   Proces = 'opera';   Data = "$env:APPDATA\Opera Software\Opera Stable";                Ww = 'opera://settings/passwords' }
+    @{ Naam = 'Chrome';  Proces = 'chrome';  Data = "$env:LOCALAPPDATA\Google\Chrome\User Data";               Ww = 'chrome://password-manager/settings'; Winget = 'Google.Chrome' }
+    @{ Naam = 'Edge';    Proces = 'msedge';  Data = "$env:LOCALAPPDATA\Microsoft\Edge\User Data";              Ww = 'edge://settings/autofill/passwords'; Winget = 'Microsoft.Edge' }
+    @{ Naam = 'Brave';   Proces = 'brave';   Data = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"; Ww = 'brave://password-manager/settings'; Winget = 'Brave.Brave' }
+    @{ Naam = 'Vivaldi'; Proces = 'vivaldi'; Data = "$env:LOCALAPPDATA\Vivaldi\User Data";                     Ww = 'vivaldi://settings/passwords'; Winget = 'Vivaldi.Vivaldi' }
+    @{ Naam = 'Opera';   Proces = 'opera';   Data = "$env:APPDATA\Opera Software\Opera Stable";                Ww = 'opera://settings/passwords'; Winget = 'Opera.Opera' }
 )
 
 # Bestanden per Chromium-profiel die de moeite waard zijn. 'Login Data' (wachtwoorden) en
@@ -2373,6 +2373,24 @@ function script:Test-BrowserAanwezig([hashtable]$B) {
     return (Test-Path -LiteralPath $B.Data)
 }
 
+# Installeert een browser via winget, in de weergavetaal van Windows als het pakket die taal heeft. Heeft
+# het pakket geen aparte taalversies (zoals Chrome), dan het gewone, dat zelf de taal van Windows volgt.
+function script:Install-Browser([hashtable]$B) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Let "winget ontbreekt; installeer $($B.Naam) zelf of installeer App Installer uit de Microsoft Store."
+        return $false
+    }
+    $taal = (Get-UICulture).Name
+    & winget install --id $B.Winget -e --locale $taal --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0 -and -not (Test-BrowserAanwezig $B)) {
+        Write-Host "  Geen aparte versie in $taal; de gewone versie volgt de taal van Windows."
+        & winget install --id $B.Winget -e --accept-package-agreements --accept-source-agreements
+    }
+    if (Test-BrowserAanwezig $B) { Write-Ok "$($B.Naam) is geïnstalleerd."; return $true }
+    Write-Let "$($B.Naam) installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven."
+    return $false
+}
+
 # Importeert één CSV in een browser: automatisch, en anders met handmatige stappen
 function script:Import-WachtwoordCsv([hashtable]$B, $Csv) {
     # Een nog nooit gestarte browser toont eerst welkomstschermen; die gaan voor
@@ -2442,7 +2460,7 @@ function Restore-Wachtwoorden {
     foreach ($csv in $uniek) {
         $herkomst = $script:Chromium | Where-Object { $csv.Name -match [regex]::Escape($_.Naam) } | Select-Object -First 1
         $b = $browsers | Where-Object { $herkomst -and $_.Naam -eq $herkomst.Naam } | Select-Object -First 1
-        if ($herkomst -and -not $b) { $nietAanwezig += [pscustomobject]@{ Csv = $csv; Van = $herkomst.Naam }; continue }
+        if ($herkomst -and -not $b) { $nietAanwezig += [pscustomobject]@{ Csv = $csv; Van = $herkomst }; continue }
         if (-not $b) { $zonderBrowser += $csv; continue }
         if (-not $perBrowser.Contains($b.Naam)) { $perBrowser[$b.Naam] = @{ B = $b; Csvs = @() } }
         $perBrowser[$b.Naam].Csvs += $csv
@@ -2452,11 +2470,16 @@ function Restore-Wachtwoorden {
         if (-not (Read-JaNee "Wachtwoorden uit $namen importeren in $($groep.B.Naam)?")) { continue }
         foreach ($csv in $groep.Csvs) { Import-WachtwoordCsv $groep.B $csv }
     }
-    # Bestanden uit een browser die hier (nog) niet staat: dat eerst zeggen, dan pas een andere browser aanbieden
+    # Bestanden uit een browser die hier (nog) niet staat: die browser aanbieden, anders een andere
     foreach ($n in $nietAanwezig) {
-        Write-Let "$($n.Csv.Name) komt uit $($n.Van), maar $($n.Van) staat niet op deze laptop. Installeer $($n.Van) eerst (stap Programma's) en draai deze stap opnieuw om ze daar te importeren."
+        $van = $n.Van
+        if (Test-BrowserAanwezig $van) { Import-WachtwoordCsv $van $n.Csv; continue }   # net geïnstalleerd
+        Write-Let "$($n.Csv.Name) komt uit $($van.Naam), maar $($van.Naam) staat niet op deze laptop."
+        if (Read-JaNee "$($van.Naam) nu installeren via winget (taal: $((Get-UICulture).DisplayName)) en de wachtwoorden daarin zetten?") {
+            if (Install-Browser $van) { Import-WachtwoordCsv $van $n.Csv; continue }
+        }
         foreach ($b in $browsers) {
-            if (-not (Read-JaNee "De wachtwoorden uit $($n.Van) toch importeren in $($b.Naam)?")) { continue }
+            if (-not (Read-JaNee "De wachtwoorden uit $($van.Naam) dan importeren in $($b.Naam)?")) { continue }
             Import-WachtwoordCsv $b $n.Csv
             break
         }
