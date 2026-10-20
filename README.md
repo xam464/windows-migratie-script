@@ -62,7 +62,8 @@ gebruiker die het start, dus start het als de gebruiker wiens gegevens je wilt m
 Het script kopieert zichzelf naar de back-upmap. Start het daar op de nieuwe laptop; het biedt dan zelf
 aan om te herstellen. Het installeert de programma's met `winget` (je kiest welke), biedt ESET Security
 aan als virusscanner en zet instellingen, bladwijzers, het Firefox-profiel en je bestanden terug.
-Bestanden die op de nieuwe laptop nieuwer zijn, blijven staan.
+Bestanden die op de nieuwe laptop nieuwer zijn, blijven staan. De geëxporteerde wachtwoorden importeert
+het automatisch in Chrome, Edge of een andere Chromium-browser.
 
 ## Overstappen naar Linux
 
