@@ -710,19 +710,25 @@ function Protect-Wachtwoorden([string]$Map) {
     }
 
     while ($true) {
-        $pw  = [Net.NetworkCredential]::new('', (Read-Host '  Wachtwoord voor het archief (min. 12 tekens)' -AsSecureString)).Password
+        $pw  = [Net.NetworkCredential]::new('', (Read-Host '  Wachtwoord voor het archief' -AsSecureString)).Password
         $pw2 = [Net.NetworkCredential]::new('', (Read-Host '  Herhaal het wachtwoord' -AsSecureString)).Password
-        if ($pw.Length -lt 12) { Write-Let 'Te kort.'; continue }
-        # Windows PowerShell 5.1 geeft " en een \ aan het eind verminkt door aan 7-Zip
-        if ($pw -match '"|\\$') { Write-Let 'Gebruik geen " en laat het wachtwoord niet op \ eindigen.'; continue }
+        if (-not $pw) { Write-Let 'Leeg wachtwoord.'; continue }
         if ($pw -ne $pw2) { Write-Let 'Komt niet overeen.'; continue }
         break
     }
 
+    # Het wachtwoord gaat via de invoer naar 7-Zip, niet als argument: Windows PowerShell 5.1 verminkt
+    # " en \ in argumenten. Met UTF-8 aan beide kanten komen ook tekens als é en € heel aan.
     $archief = Join-Path $Map ('wachtwoorden_{0}.7z' -f (Get-Date -Format 'HHmmss'))
-    & $7z a -t7z -mhe=on "-p$pw" $archief $csvs.FullName | Out-Null
-    $ok = $LASTEXITCODE -eq 0
-    if ($ok) { & $7z t "-p$pw" $archief | Out-Null; $ok = $LASTEXITCODE -eq 0 }
+    $oudeEncoding = $OutputEncoding
+    $OutputEncoding = [Text.UTF8Encoding]::new($false)
+    try {
+        $pw, $pw | & $7z a -sccUTF-8 -t7z -mhe=on -p $archief $csvs.FullName | Out-Null
+        $ok = $LASTEXITCODE -eq 0
+        if ($ok) { $pw | & $7z t -sccUTF-8 $archief | Out-Null; $ok = $LASTEXITCODE -eq 0 }
+    } finally {
+        $OutputEncoding = $oudeEncoding
+    }
     $pw = $null; $pw2 = $null
 
     if ($ok) {
