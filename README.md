@@ -11,7 +11,7 @@ Er wordt alleen gekopieerd: op de oude pc wordt niets verwijderd.
   opnieuw te installeren.
 - **Browsers** (Chrome, Edge, Brave, Vivaldi, Opera, Firefox): bladwijzers (ook als HTML), instellingen en
   een lijst van extensies. Firefox gaat als heel profiel mee.
-- **Wachtwoorden**: een begeleide export uit de browser, daarna versleuteld met 7-Zip (AES-256).
+- **Wachtwoorden**: automatische export uit Chrome, Edge en andere Chromium-browsers naar CSV; je bevestigt alleen met je Windows-pincode of -wachtwoord.
 - **Programma-instellingen**: Outlook (handtekeningen en PST-bestanden), Office-sjablonen, VS Code,
   Notepad++, Thunderbird, FileZilla, Windows Terminal, Sticky Notes, eigen lettertypen, PuTTY en WinSCP.
 - **eM Client**: de hele database, met accounts, serverinstellingen, mail en de opgeslagen
@@ -60,9 +60,9 @@ gebruiker die het start, dus start het als de gebruiker wiens gegevens je wilt m
 ## Herstellen op een nieuwe Windows-laptop
 
 Het script kopieert zichzelf naar de back-upmap. Start het daar op de nieuwe laptop; het biedt dan zelf
-aan om te herstellen. Het installeert de programma's met `winget` (je kiest welke) en zet instellingen,
-bladwijzers, het Firefox-profiel en je bestanden terug. Bestanden die op de nieuwe laptop nieuwer zijn,
-blijven staan.
+aan om te herstellen. Het installeert de programma's met `winget` (je kiest welke), biedt ESET Security
+aan als virusscanner en zet instellingen, bladwijzers, het Firefox-profiel en je bestanden terug.
+Bestanden die op de nieuwe laptop nieuwer zijn, blijven staan.
 
 ## Overstappen naar Linux
 
@@ -92,7 +92,7 @@ openSUSE en Arch.
 ## Vereisten
 
 - Windows 10 of 11 met Windows PowerShell 5.1 (standaard aanwezig)
-- Optioneel: `winget` (App Installer) en 7-Zip; het script biedt aan 7-Zip te installeren
+- Optioneel: `winget` (App Installer)
 
 ## Waarom er geen handtekening op zit
 

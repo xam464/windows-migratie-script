@@ -5,7 +5,7 @@
     - Geïnstalleerde programma's (register, Store-apps, winget export)
     - Browsers: bladwijzers (ook als HTML), instellingen, extensielijst
       (Chrome, Edge, Brave, Vivaldi, Opera, Firefox)
-    - Begeleide wachtwoord-export uit de browser, daarna versleuteld met 7-Zip (AES-256)
+    - Automatische wachtwoord-export uit de browser naar CSV
     - Programma-instellingen uit AppData (Outlook, Office, VS Code, Notepad++, Thunderbird, PuTTY, ...)
     - Home-map scannen (grootte, aantal bestanden, grootste bestanden) en kopiëren met robocopy,
       met logging en controle achteraf
@@ -56,7 +56,7 @@ $ErrorActionPreference = 'Stop'
 # Chromium-browsers: waar de gebruikersdata staat en waar de wachtwoord-export zit
 $script:Chromium = @(
     @{ Naam = 'Chrome';  Proces = 'chrome';  Data = "$env:LOCALAPPDATA\Google\Chrome\User Data";               Ww = 'chrome://password-manager/settings' }
-    @{ Naam = 'Edge';    Proces = 'msedge';  Data = "$env:LOCALAPPDATA\Microsoft\Edge\User Data";              Ww = 'edge://settings/passwords' }
+    @{ Naam = 'Edge';    Proces = 'msedge';  Data = "$env:LOCALAPPDATA\Microsoft\Edge\User Data";              Ww = 'edge://settings/autofill/passwords' }
     @{ Naam = 'Brave';   Proces = 'brave';   Data = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"; Ww = 'brave://password-manager/settings' }
     @{ Naam = 'Vivaldi'; Proces = 'vivaldi'; Data = "$env:LOCALAPPDATA\Vivaldi\User Data";                     Ww = 'vivaldi://settings/passwords' }
     @{ Naam = 'Opera';   Proces = 'opera';   Data = "$env:APPDATA\Opera Software\Opera Stable";                Ww = 'opera://settings/passwords' }
@@ -228,8 +228,8 @@ $script:WachtwoordUitleg = @'
   door. Jij hoeft alleen nog je pincode of wachtwoord in te vullen bij de Windows-prompt. Lukt het
   automatisch klikken niet (andere browserversie of taal), dan verschijnen de handmatige stappen.
 
-  Let op: zo'n CSV bevat al je wachtwoorden in leesbare tekst. Dit script versleutelt hem daarna
-  met 7-Zip (AES-256) en verwijdert het origineel.
+  Let op: zo'n CSV bevat al je wachtwoorden in leesbare tekst. Bewaar de back-up dus goed en
+  verwijder de CSV-bestanden zodra ze op de nieuwe laptop zijn geïmporteerd.
   Tip: een wachtwoordmanager (Bitwarden/Vaultwarden, KeePassXC) kan zo'n CSV direct importeren.
 
 '@
@@ -249,6 +249,7 @@ bestanden terug. Hieronder staat hoe je alles met de hand doet.
    - winget-apps.json:  winget import -i winget-apps.json --accept-package-agreements
    - winget-niet-beschikbaar.txt: deze programma's staan niet in winget en moet je zelf installeren.
    - programmas.csv: de volledige lijst met versies en uitgevers (opent in Excel).
+   - ESET Security (virusscanner):  winget install --id=ESET.Security -e
 
 2. Bladwijzers
    - Browsers\<browser>\<profiel>\bladwijzers.html: in elke browser te importeren via
@@ -265,10 +266,11 @@ bestanden terug. Hieronder staat hoe je alles met de hand doet.
      daaroverheen. Bladwijzers, wachtwoorden, extensies en instellingen komen dan mee.
 
 5. Wachtwoorden
-   - Pak Wachtwoorden\wachtwoorden_*.7z uit met 7-Zip.
+   - De CSV-bestanden staan in de map Wachtwoorden. (Een oudere back-up kan een
+     wachtwoorden_*.7z bevatten: pak die eerst uit met 7-Zip en het archiefwachtwoord.)
    - Importeer de CSV in de browser (chrome://password-manager/settings > Importeren,
-     edge://settings/passwords > Importeren) of in je wachtwoordmanager.
-   - Verwijder de uitgepakte CSV daarna meteen.
+     edge://settings/autofill/passwords > ... > Importeren) of in je wachtwoordmanager.
+   - Verwijder de CSV daarna meteen.
 
 6. Bestanden
    - Home\<map> terugzetten, bijvoorbeeld:
@@ -684,185 +686,171 @@ function Backup-Browsers {
 # Wachtwoorden
 # ---------------------------------------------------------------------------
 
-function Protect-Wachtwoorden([string]$Map) {
-    $csvs = @(Get-ChildItem -LiteralPath $Map -Filter *.csv -File -ErrorAction SilentlyContinue)
-    if (-not $csvs) { return }
-
-    $7z = @((Get-Command 7z.exe -ErrorAction SilentlyContinue).Source,
-            "$env:ProgramFiles\7-Zip\7z.exe",
-            "${env:ProgramFiles(x86)}\7-Zip\7z.exe") |
-        Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-
-    if (-not $7z) {
-        Write-Let '7-Zip niet gevonden. De CSV-bestanden staan ONVERSLEUTELD in de back-up!'
-        if ((Get-Command winget -ErrorAction SilentlyContinue) -and (Read-JaNee '7-Zip nu installeren via winget?')) {
-            winget install --id 7zip.7zip -e --accept-source-agreements --accept-package-agreements
-            $7z = "$env:ProgramFiles\7-Zip\7z.exe"
-        }
-        if (-not $7z -or -not (Test-Path -LiteralPath $7z)) { return }
-    }
-
-    while ($true) {
-        $pw  = [Net.NetworkCredential]::new('', (Read-Host '  Wachtwoord voor het archief (min. 12 tekens)' -AsSecureString)).Password
-        $pw2 = [Net.NetworkCredential]::new('', (Read-Host '  Herhaal het wachtwoord' -AsSecureString)).Password
-        if ($pw.Length -lt 12) { Write-Let 'Te kort.'; continue }
-        # Windows PowerShell 5.1 geeft " en een \ aan het eind verminkt door aan 7-Zip
-        if ($pw -match '"|\\$') { Write-Let 'Gebruik geen " en laat het wachtwoord niet op \ eindigen.'; continue }
-        if ($pw -ne $pw2) { Write-Let 'Komt niet overeen.'; continue }
-        break
-    }
-
-    $archief = Join-Path $Map ('wachtwoorden_{0}.7z' -f (Get-Date -Format 'HHmmss'))
-    & $7z a -t7z -mhe=on "-p$pw" $archief $csvs.FullName | Out-Null
-    $ok = $LASTEXITCODE -eq 0
-    if ($ok) { & $7z t "-p$pw" $archief | Out-Null; $ok = $LASTEXITCODE -eq 0 }
-    $pw = $null; $pw2 = $null
-
-    if ($ok) {
-        $csvs | Remove-Item -Force
-        Write-Ok "Versleuteld naar $(Split-Path $archief -Leaf); de CSV-bestanden zijn verwijderd."
-        Write-Let 'Bewaar het archiefwachtwoord NIET bij de back-up (bijvoorbeeld op papier of in je wachtwoordmanager).'
-    } else {
-        Write-Fout '7-Zip is mislukt; de CSV-bestanden zijn NIET verwijderd.'
-    }
-}
-
-# UI Automation-namen van de knoppen in de Chromium-wachtwoordpagina. Deze verschillen per
-# browserversie en per taal; pas ze hier aan als het automatisch klikken niet aanslaat. Lukt het
-# niet, dan valt Export-Wachtwoorden vanzelf terug op de handmatige stappen.
+# Wachtwoord-export automatisch aansturen met UI Automation en een paar Win32-functies. Getest op
+# Windows 10 22H2 met Edge en Chrome 155. Wat daarbij bleek:
+# - chrome://- en edge://-adressen op de opdrachtregel worden genegeerd. Het script opent daarom een
+#   nieuw venster en gaat via de adresbalk naar de wachtwoordpagina (Ctrl+L, plakken, Enter).
+# - Invoke() op een knop die een Windows-venster opent, wacht tot dat venster weer dicht is. Klikken
+#   gebeurt daarom in een aparte runspace.
+# - Zolang de Windows-beveiligingsprompt openstaat, reageert de browser niet op UI Automation. Het
+#   opslagvenster wordt daarom met EnumWindows gezocht en via het toetsenbord ingevuld.
+# - Chrome/Brave: knop met AutomationId 'exportPasswordsButton' (in elke taal hetzelfde).
+#   Edge: menu 'meer weergeven' > 'Wachtwoorden exporteren' > knop 'Exporteren'.
+# Lukt een stap niet, dan valt Export-Wachtwoorden terug op de handmatige stappen.
 $script:UiaNamen = @{
-    Meer         = '(?i)meer acties|more actions'
-    Export       = '(?i)wachtwoorden exporteren|export passwords'
-    Opslaan      = '(?i)^\s*(opslaan|save|bewaren)\s*$'
-    Bestandsnaam = '(?i)bestandsnaam|file name'
+    Meer     = '^(meer weergeven|meer acties|more actions|show more|more options)$'
+    Export   = '^(wachtwoorden exporteren|export passwords)'
+    Bevestig = '^(exporteren|export|wachtwoorden exporteren|export passwords)$'
 }
 
-# Zoekt binnen $Root naar het eerste zichtbare element van een van de gevraagde controletypen
-# waarvan de naam op $Regex past. Blijft tot $TimeoutMs proberen, zodat trage pagina's meekomen.
-function script:Uia-Find {
-    param($Root, [System.Windows.Automation.ControlType[]]$Types, [string]$Regex, [int]$TimeoutMs = 8000)
-    $conds = foreach ($t in $Types) {
-        New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $t)
+function script:Initialize-Automatisering {
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms -ErrorAction Stop
+    if (-not ('Migratie.Venster' -as [type])) {
+        Add-Type -Namespace Migratie -Name Venster -ErrorAction Stop -MemberDefinition @'
+public delegate bool EnumProc(System.IntPtr h, System.IntPtr l);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, System.IntPtr l);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h);
+[DllImport("user32.dll")] public static extern int GetWindowTextLength(System.IntPtr h);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(System.IntPtr h, System.Text.StringBuilder s, int n);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr h);
+[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, int flags, int extra);
+'@
     }
-    $cond = if (@($conds).Count -eq 1) { $conds } else { New-Object System.Windows.Automation.OrCondition($conds) }
+}
+
+# Zichtbare vensters van een klasse ('Chrome_WidgetWin_1', '#32770') van een proces, voorste eerst.
+# Zonder UI Automation, zodat dit ook werkt terwijl de browser op de Windows-prompt wacht.
+function script:Get-Vensters([string]$Klasse, [string]$Proces, [switch]$MetTitel) {
+    $ids = @(Get-Process -Name $Proces -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    $lijst = New-Object System.Collections.Generic.List[IntPtr]
+    $terug = [Migratie.Venster+EnumProc] {
+        param($h, $l)
+        $k = New-Object System.Text.StringBuilder 64
+        [void][Migratie.Venster]::GetClassName($h, $k, 64)
+        if ($k.ToString() -eq $Klasse -and [Migratie.Venster]::IsWindowVisible($h) -and
+            (-not $MetTitel -or [Migratie.Venster]::GetWindowTextLength($h) -gt 0)) {
+            $p = 0
+            [void][Migratie.Venster]::GetWindowThreadProcessId($h, [ref]$p)
+            if ($ids -contains [int]$p) { $lijst.Add($h) }
+        }
+        $true
+    }
+    [void][Migratie.Venster]::EnumWindows($terug, [IntPtr]::Zero)
+    return $lijst.ToArray()
+}
+
+# Haalt een venster naar voren (de Alt-toets maakt dat Windows dat toestaat) en typt toetsen.
+function script:Send-Toetsen([IntPtr]$Venster, [string[]]$Toetsen) {
+    [Migratie.Venster]::keybd_event(0x12, 0, 0, 0)
+    [Migratie.Venster]::keybd_event(0x12, 0, 2, 0)
+    [void][Migratie.Venster]::SetForegroundWindow($Venster)
+    Start-Sleep -Milliseconds 400
+    foreach ($t in $Toetsen) {
+        [System.Windows.Forms.SendKeys]::SendWait($t)
+        Start-Sleep -Milliseconds 250
+    }
+}
+
+# Zoekt in $Venster een element op AutomationId of op naam en type. Blijft tot $TimeoutMs proberen,
+# zodat een pagina of menu eerst kan laden.
+function script:Find-Element {
+    param([IntPtr]$Venster, [string]$Id, [string]$Naam, [string[]]$Typen, [int]$TimeoutMs = 8000)
     $deadline = [DateTime]::Now.AddMilliseconds($TimeoutMs)
     do {
-        try {
-            foreach ($e in $Root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
-                if ($e.Current.Name -match $Regex) { return $e }
-            }
-        } catch {}
-        Start-Sleep -Milliseconds 350
-    } while ([DateTime]::Now -lt $deadline)
-    return $null
-}
-
-# Klikt/opent een element: eerst via Invoke (knoppen), anders via Expand (uitklapmenu's).
-function script:Uia-Klik($E) {
-    if (-not $E) { return $false }
-    try { $E.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch {}
-    try { $E.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand(); return $true } catch {}
-    return $false
-}
-
-# Alle open browservensters (Chromium deelt deze vensterklasse).
-function script:Uia-Vensters {
-    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-    $c = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ClassNameProperty, 'Chrome_WidgetWin_1')
-    return @($desktop.FindAll([System.Windows.Automation.TreeScope]::Children, $c))
-}
-
-# Kiest de browservensters waarin gezocht mag worden, zodat een ander open Chromium-venster niet
-# per ongeluk aangeklikt wordt. Eerst het venster van het proces dat we net startten; anders het
-# voorgrondvenster (als dat een Chromium-venster is); als laatste redmiddel alle Chromium-vensters.
-function script:Uia-DoelVensters($Proc) {
-    $alle = Uia-Vensters
-    try {
-        if ($Proc -and -not $Proc.HasExited) {
-            $Proc.Refresh()
-            $h = $Proc.MainWindowHandle
-            if ($h -ne [IntPtr]::Zero) {
-                $el = [System.Windows.Automation.AutomationElement]::FromHandle($h)
-                if ($el) { return @($el) }
-            }
+        foreach ($h in @($Venster)) {
+            try {
+                $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
+                foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+                        [System.Windows.Automation.Condition]::TrueCondition)) {
+                    $c = $e.Current
+                    if ($Id -and $c.AutomationId -eq $Id) { return $e }
+                    if ($Naam -and $c.Name -match $Naam -and
+                        ($c.ControlType.ProgrammaticName -replace '^ControlType\.', '') -in $Typen) { return $e }
+                }
+            } catch {}
         }
-    } catch {}
-    try {
-        if (-not ('Uia.Win' -as [type])) {
-            Add-Type -Namespace Uia -Name Win -MemberDefinition `
-                '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();'
-        }
-        $fg = [Uia.Win]::GetForegroundWindow()
-        foreach ($w in $alle) {
-            if ([IntPtr]$w.Current.NativeWindowHandle -eq $fg) { return @($w) }
-        }
-    } catch {}
-    return $alle
-}
-
-# Wacht tot een dialoogvenster met de gevraagde vensterklasse verschijnt (bijv. het opslagvenster).
-function script:Uia-Dialoog([string]$ClassName, [int]$TimeoutMs) {
-    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-    $c = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ClassNameProperty, $ClassName)
-    $deadline = [DateTime]::Now.AddMilliseconds($TimeoutMs)
-    do {
-        try { $d = $desktop.FindFirst([System.Windows.Automation.TreeScope]::Children, $c); if ($d) { return $d } } catch {}
         Start-Sleep -Milliseconds 400
     } while ([DateTime]::Now -lt $deadline)
     return $null
 }
 
-# Stuurt via UI Automation de wachtwoord-export van een Chromium-browser aan. De gebruiker hoeft
-# alleen nog zijn pincode in te vullen bij de Windows-beveiligingsprompt. Geeft $true terug als de
-# CSV er daadwerkelijk staat; $false betekent: terugvallen op de handmatige stappen.
+# Klikt zonder te wachten: Invoke() keert pas terug als een daardoor geopend venster dicht is.
+function script:Invoke-Klik($Element) {
+    $ps = [powershell]::Create().AddScript({
+        param($e)
+        try { $e.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke() } catch {}
+    }).AddArgument($Element)
+    [void]$ps.BeginInvoke()
+}
+
+# Welke CSV-bestanden er sinds $Bestaand in $Map bij zijn gekomen. Zo maakt de standaard-
+# bestandsnaam van de browser niet uit (Edge slaat in het NL op als 'Microsoft Edge-wachtwoorden.csv').
+function script:Get-NieuweCsv([string]$Map, [string[]]$Bestaand) {
+    @(Get-ChildItem -LiteralPath $Map -Filter *.csv -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin $Bestaand })
+}
+
+# Exporteert de wachtwoorden uit een Chromium-browser naar $Csv. De gebruiker hoeft alleen de
+# Windows-prompt te bevestigen. $true als er een nieuwe CSV in $Map staat; $false = handmatig verder.
 function Invoke-ChromiumExport {
-    param([hashtable]$B, [string]$Csv, $Proc)
-    try { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction Stop } catch { return $false }
-    $btnMi = @([System.Windows.Automation.ControlType]::Button, [System.Windows.Automation.ControlType]::MenuItem)
-    $doel = Uia-DoelVensters $Proc
+    param([hashtable]$B, [string]$Csv, [string]$Map, [string[]]$Bestaand)
+    $script:ExportFout = $null
+    try { Initialize-Automatisering } catch { $script:ExportFout = "automatisering niet beschikbaar ($($_.Exception.Message))"; return $false }
+    $proces = $B.Proces
 
-    # 1. Het 'Exporteren'-menu-item vinden (eventueel eerst het 'meer acties'-menu uitklappen).
-    $export = $null
-    foreach ($w in $doel) { $export = Uia-Find $w $btnMi $script:UiaNamen.Export 3000; if ($export) { break } }
-    if (-not $export) {
-        foreach ($w in $doel) {
-            $meer = Uia-Find $w $btnMi $script:UiaNamen.Meer 2500
-            if ($meer) { [void](Uia-Klik $meer); Start-Sleep -Milliseconds 600; break }
-        }
-        foreach ($w in $doel) { $export = Uia-Find $w $btnMi $script:UiaNamen.Export 3000; if ($export) { break } }
+    # 1. Een nieuw venster openen en via de adresbalk naar de wachtwoordpagina gaan.
+    $voor = @(Get-Vensters 'Chrome_WidgetWin_1' $proces -MetTitel)
+    try { Start-Process -FilePath $proces -ArgumentList '--new-window' } catch { $script:ExportFout = 'browser niet te starten'; return $false }
+    $venster = $null
+    $deadline = [DateTime]::Now.AddSeconds(15)
+    while (-not $venster -and [DateTime]::Now -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $venster = @(Get-Vensters 'Chrome_WidgetWin_1' $proces -MetTitel) | Where-Object { $voor -notcontains $_ } | Select-Object -First 1
     }
-    if (-not $export) { return $false }
-    [void](Uia-Klik $export)
-    Start-Sleep -Milliseconds 800
+    if (-not $venster) { $script:ExportFout = 'geen nieuw browservenster verschenen'; return $false }
+    Start-Sleep -Seconds 1
+    Set-Clipboard -Value $B.Ww
+    Send-Toetsen $venster '^l', '^v', '{ENTER}'
 
-    # 2. De bevestigingsknop 'Exporteren' in de dialoog (zelfde naam) aanklikken.
-    foreach ($w in $doel) {
-        $bevestig = Uia-Find $w @([System.Windows.Automation.ControlType]::Button) $script:UiaNamen.Export 3000
-        if ($bevestig) { [void](Uia-Klik $bevestig); break }
+    # 2. De exportknop (Chrome/Brave) of het menu met de export (Edge) zoeken en aanklikken.
+    $knop = Find-Element -Venster $venster -Id 'exportPasswordsButton' -Naam "$($script:UiaNamen.Meer)|$($script:UiaNamen.Export)" -Typen 'Button' -TimeoutMs 10000
+    if (-not $knop) { $script:ExportFout = 'exportknop of menu niet gevonden op de wachtwoordpagina'; return $false }
+    $dialogenVoor = @(Get-Vensters '#32770' $proces)
+    if ($knop.Current.AutomationId -ne 'exportPasswordsButton' -and $knop.Current.Name -match $script:UiaNamen.Meer) {
+        # Het menu is onderdeel van de pagina zelf, dus ook in dit venster zoeken
+        Invoke-Klik $knop
+        $item = Find-Element -Venster $venster -Naam $script:UiaNamen.Export -Typen 'MenuItem' -TimeoutMs 4000
+        if (-not $item) { $script:ExportFout = "menu-item 'Wachtwoorden exporteren' niet gevonden"; return $false }
+        Invoke-Klik $item
+        $bevestig = Find-Element -Venster $venster -Naam $script:UiaNamen.Bevestig -Typen 'Button' -TimeoutMs 4000
+        if (-not $bevestig) { $script:ExportFout = "knop 'Exporteren' niet gevonden"; return $false }
+        Invoke-Klik $bevestig
+    } else {
+        Invoke-Klik $knop
     }
 
-    # 3. Windows Hello: hier vult de gebruiker zelf zijn pincode of wachtwoord in.
-    Write-Host '  >> Vul nu je pincode of wachtwoord in bij de Windows-beveiligingsprompt.' -ForegroundColor Yellow
-
-    # 4. Wachten op het opslagvenster en het volledige pad invullen, daarna opslaan.
-    $dlg = Uia-Dialoog '#32770' 120000
-    if (-not $dlg) { return (Test-Path -LiteralPath $Csv) }
-    $edit = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Edit) $script:UiaNamen.Bestandsnaam 5000
-    if (-not $edit) { $edit = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Edit) '.' 3000 }
-    if ($edit) {
-        try { $edit.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($Csv) } catch {}
+    # 3. Windows vraagt nu (meestal) om de pincode of het wachtwoord; daarna komt het opslagvenster.
+    #    Vanaf hier geen UI Automation meer op de browser: die reageert niet zolang de prompt openstaat.
+    Write-Host '  >> Bevestig met je Windows-pincode of -wachtwoord als Windows daarom vraagt.' -ForegroundColor Yellow
+    $dialoog = $null
+    $deadline = [DateTime]::Now.AddMinutes(3)
+    while (-not $dialoog -and [DateTime]::Now -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        $dialoog = @(Get-Vensters '#32770' $proces -MetTitel) | Where-Object { $dialogenVoor -notcontains $_ } | Select-Object -First 1
     }
-    Start-Sleep -Milliseconds 300
-    $opslaan = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Button) $script:UiaNamen.Opslaan 4000
-    if ($opslaan) { [void](Uia-Klik $opslaan) }
+    if (-not $dialoog) { $script:ExportFout = 'geen opslagvenster verschenen (prompt geannuleerd?)'; return $false }
 
-    # 5. Wachten tot het bestand er echt staat.
+    # 4. Het volledige pad in het bestandsnaamveld plakken (Alt+N) en opslaan.
+    Start-Sleep -Milliseconds 500
+    Set-Clipboard -Value $Csv
+    Send-Toetsen $dialoog '%n', '^a', '^v', '{ENTER}'
+
     $deadline = [DateTime]::Now.AddSeconds(20)
-    while ([DateTime]::Now -lt $deadline -and -not (Test-Path -LiteralPath $Csv)) { Start-Sleep -Milliseconds 400 }
-    return (Test-Path -LiteralPath $Csv)
+    while ([DateTime]::Now -lt $deadline -and (Get-NieuweCsv $Map $Bestaand).Count -eq 0) { Start-Sleep -Milliseconds 400 }
+    if ((Get-NieuweCsv $Map $Bestaand).Count -gt 0) { return $true }
+    $script:ExportFout = 'opslaan is niet gelukt'
+    return $false
 }
 
 function Export-Wachtwoorden {
@@ -877,37 +865,44 @@ function Export-Wachtwoorden {
         if (-not (Read-JaNee "Wachtwoorden exporteren uit $($b.Naam)?")) { continue }
 
         $csv = Join-Path $map "$($b.Naam)-wachtwoorden.csv"
-        $proc = $null
-        try { $proc = Start-Process -FilePath $b.Proces -ArgumentList $b.Ww -PassThru }
-        catch { Write-Let "Kon $($b.Naam) niet starten; open hem zelf."; Set-Clipboard -Value $b.Ww }
-        Write-Host "  $($b.Naam) wordt geopend. Ik probeer het exporteren automatisch te starten..."
-        Start-Sleep -Seconds 4
+        # Momentopname vooraf: alles wat hierna aan CSV's verschijnt, is deze export (ongeacht de naam
+        # die de browser kiest, zoals 'Microsoft Edge-wachtwoorden.csv' in het Nederlands).
+        $bestaand = @(Get-ChildItem -LiteralPath $map -Filter *.csv -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
 
+        Write-Host "  $($b.Naam) wordt geopend en de export wordt automatisch gestart. Klik niet in het browservenster tot het klaar is."
         $gelukt = $false
-        try { $gelukt = Invoke-ChromiumExport -B $b -Csv $csv -Proc $proc } catch { $gelukt = $false }
+        try { $gelukt = Invoke-ChromiumExport -B $b -Csv $csv -Map $map -Bestaand $bestaand }
+        catch { $gelukt = $false; $script:ExportFout = $_.Exception.Message }
 
-        if (-not $gelukt -and -not (Test-Path -LiteralPath $csv)) {
+        if (-not $gelukt -and (Get-NieuweCsv $map $bestaand).Count -eq 0) {
             # Automatisch klikken sloeg niet aan (andere versie/taal): terug naar de handmatige stappen.
-            Write-Let 'Automatisch starten lukte niet; doe de export even met de hand:'
+            Write-Let "Automatisch exporteren lukte niet ($script:ExportFout); doe het even met de hand:"
             Set-Clipboard -Value $b.Ww
-            Write-Host "  1. Het adres $($b.Ww) staat op je klembord. Plak het in de adresbalk als de pagina niet vanzelf opent."
+            if (-not (Get-Process -Name $b.Proces -ErrorAction SilentlyContinue)) {
+                try { Start-Process -FilePath $b.Proces } catch { Write-Let "Kon $($b.Naam) niet starten; open hem zelf." }
+            }
+            Write-Host "  1. Het adres $($b.Ww) staat op je klembord. Plak het in de adresbalk van $($b.Naam)."
             Write-Host "  2. Kies 'Wachtwoorden exporteren/downloaden' en bevestig met je Windows-pincode of -wachtwoord."
             [void](Read-Host '  3. Druk op Enter zodra het venster om op te slaan open is')
-            Set-Clipboard -Value $csv
-            Write-Host '  4. Het opslagpad staat nu op je klembord. Plak het in het veld voor de bestandsnaam:'
-            Write-Host "     $csv" -ForegroundColor White
+            Write-Host "  4. Sla het op in deze map (de standaard bestandsnaam van de browser is prima):"
+            Write-Host "     $map" -ForegroundColor White
+            Set-Clipboard -Value $map
+            Write-Host '     Het mappad staat op je klembord; plak het bovenin de adresbalk van het opslagvenster.'
             [void](Read-Host '  5. Druk op Enter als het bestand is opgeslagen')
         }
 
-        if (Test-Path -LiteralPath $csv) { Write-Ok "$($b.Naam): opgeslagen" }
-        else { Write-Let "$($b.Naam): $csv niet gevonden. Heb je een andere naam of map gekozen? Zet het bestand dan zelf in $map." }
+        $nieuw = Get-NieuweCsv $map $bestaand
+        if ($nieuw.Count -gt 0) { Write-Ok "$($b.Naam): opgeslagen ($($nieuw.Name -join ', '))" }
+        else { Write-Let "$($b.Naam): geen nieuw CSV-bestand gevonden in $map. Heb je het ergens anders opgeslagen? Zet het dan zelf in deze map." }
     }
     Set-Clipboard -Value ' '
 
     if (Test-Path -LiteralPath (Join-Path $env:APPDATA 'Mozilla\Firefox\Profiles')) {
         Write-Host '  Firefox: de wachtwoorden gaan mee met de profielkopie (stap Browsers). Heb je een hoofdwachtwoord ingesteld? Dan heb je dat op de nieuwe laptop weer nodig.'
     }
-    Protect-Wachtwoorden $map
+    if ((Get-NieuweCsv $map @()).Count) {
+        Write-Let "De wachtwoorden staan in LEESBARE TEKST in $map. Bewaar de back-up goed en verwijder ze na het importeren."
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1707,10 +1702,17 @@ stap_bestanden() {
 stap_wachtwoorden() {
     kop 'Wachtwoorden'
     local map="$BACKUP/Wachtwoorden" a z='' tmp
-    local archieven=()
+    local archieven=() csvs=()
     for a in "$map"/*.7z; do [[ -f "$a" ]] && archieven+=("$a"); done
+    for a in "$map"/*.csv; do [[ -f "$a" ]] && csvs+=("$a"); done
+    if ((${#csvs[@]})); then
+        waarsch "Er staan ONVERSLEUTELDE CSV-bestanden in $map. Importeer ze en verwijder ze daarna."
+        echo '  Importeren: Firefox via about:logins > menu (...) > Importeren uit een bestand,'
+        echo '  Chrome/Brave/Edge via de wachtwoordinstellingen, of in je wachtwoordmanager.'
+    fi
     if ! ((${#archieven[@]})); then
-        waarsch 'Geen geëxporteerde wachtwoorden in deze back-up (Firefox-wachtwoorden zitten in het profiel).'
+        ((${#csvs[@]})) ||
+            waarsch 'Geen geëxporteerde wachtwoorden in deze back-up (Firefox-wachtwoorden zitten in het profiel).'
         return
     fi
     for a in 7z 7zz 7za; do command -v "$a" >/dev/null && { z="$a"; break; }; done
@@ -2003,6 +2005,24 @@ function Restore-Programmas {
         Write-Host "  Deze programma's stonden niet in winget; installeer ze zelf:"
         Get-Content -LiteralPath $niet -Encoding UTF8 | ForEach-Object { Write-Host "    $_" }
     }
+
+    Install-Eset
+}
+
+# Biedt ESET Security (virusscanner) aan via winget, tenzij hij er al op staat. Activeren gaat daarna
+# in ESET zelf, met een ESET HOME-account of licentiesleutel.
+function Install-Eset {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Let 'ESET Security: winget ontbreekt. Installeer App Installer uit de Microsoft Store, of download ESET via eset.com.'
+        return
+    }
+    & winget list --id ESET.Security -e --accept-source-agreements *> $null
+    if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security staat er al op.'; return }
+    Write-Host ''
+    if (-not (Read-JaNee 'ESET Security (virusscanner) installeren?')) { return }
+    & winget install --id=ESET.Security -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security is geïnstalleerd. Activeer hem met je ESET HOME-account of licentiesleutel.' }
+    else { Write-Let "ESET Security installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven." }
 }
 
 function Restore-Instellingen {
@@ -2274,16 +2294,16 @@ function Show-WachtwoordHerstel {
         Write-Let 'Geen geëxporteerde wachtwoorden in deze back-up (Firefox-wachtwoorden zitten in het profiel).'
         return
     }
-    if ($csvs) { Write-Let 'Er staan ONVERSLEUTELDE CSV-bestanden in de back-up. Verwijder ze na het importeren.' }
+    if ($csvs) { Write-Host "  CSV-bestanden: $($csvs.Name -join ', ')" }
+    if ($archieven) { Write-Host '  Oudere back-up: pak het .7z-archief eerst uit met 7-Zip (met het archiefwachtwoord).' }
     Write-Host @'
-  Wachtwoorden importeren gaat met de hand, zodat ze niet onversleuteld blijven rondslingeren:
-  1. Pak het .7z-archief uit met 7-Zip (met het archiefwachtwoord), bijvoorbeeld naar je Bureaublad.
-  2. Importeer de CSV:
+  Wachtwoorden importeren gaat met de hand:
+  1. Importeer de CSV:
      - Chrome:  chrome://password-manager/settings > Wachtwoorden importeren
-     - Edge:    edge://settings/passwords > Importeren
+     - Edge:    edge://settings/autofill/passwords > meer weergeven (...) > Wachtwoorden importeren
      - Firefox: about:logins > menu (...) > Importeren uit een bestand
      - of in je wachtwoordmanager (Bitwarden, KeePassXC).
-  3. Verwijder de uitgepakte CSV meteen en leeg de prullenbak.
+  2. Verwijder de CSV daarna meteen en leeg de prullenbak.
 '@
     if (Read-JaNee 'De map met wachtwoorden nu openen?') { Invoke-Item -LiteralPath $map }
 }
@@ -2353,7 +2373,7 @@ function Show-Menu {
         Write-Host '  1. Alles achter elkaar'
         Write-Host "  2. Programma's inventariseren"
         Write-Host '  3. Browsers: bladwijzers, instellingen, extensies'
-        Write-Host '  4. Wachtwoorden exporteren (begeleid, versleuteld)'
+        Write-Host '  4. Wachtwoorden exporteren (automatisch, naar CSV)'
         Write-Host '  5. Programma-instellingen (Outlook, Office, VS Code, ...)'
         Write-Host '  6. Home-map scannen'
         Write-Host '  7. Home-map kopiëren'
