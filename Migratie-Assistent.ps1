@@ -5,7 +5,7 @@
     - Geïnstalleerde programma's (register, Store-apps, winget export)
     - Browsers: bladwijzers (ook als HTML), instellingen, extensielijst
       (Chrome, Edge, Brave, Vivaldi, Opera, Firefox)
-    - Begeleide wachtwoord-export uit de browser, daarna desgewenst versleuteld met 7-Zip (AES-256)
+    - Automatische wachtwoord-export uit de browser naar CSV
     - Programma-instellingen uit AppData (Outlook, Office, VS Code, Notepad++, Thunderbird, PuTTY, ...)
     - Home-map scannen (grootte, aantal bestanden, grootste bestanden) en kopiëren met robocopy,
       met logging en controle achteraf
@@ -228,8 +228,8 @@ $script:WachtwoordUitleg = @'
   door. Jij hoeft alleen nog je pincode of wachtwoord in te vullen bij de Windows-prompt. Lukt het
   automatisch klikken niet (andere browserversie of taal), dan verschijnen de handmatige stappen.
 
-  Let op: zo'n CSV bevat al je wachtwoorden in leesbare tekst. Het script vraagt daarna of je hem
-  met 7-Zip (AES-256) wilt versleutelen; zo ja, dan wordt het origineel verwijderd.
+  Let op: zo'n CSV bevat al je wachtwoorden in leesbare tekst. Bewaar de back-up dus goed en
+  verwijder de CSV-bestanden zodra ze op de nieuwe laptop zijn geïmporteerd.
   Tip: een wachtwoordmanager (Bitwarden/Vaultwarden, KeePassXC) kan zo'n CSV direct importeren.
 
 '@
@@ -265,11 +265,11 @@ bestanden terug. Hieronder staat hoe je alles met de hand doet.
      daaroverheen. Bladwijzers, wachtwoorden, extensies en instellingen komen dan mee.
 
 5. Wachtwoorden
-   - Pak Wachtwoorden\wachtwoorden_*.7z uit met 7-Zip. Koos je bij de back-up voor niet
-     versleutelen, dan staan de CSV-bestanden direct in de map Wachtwoorden.
+   - De CSV-bestanden staan in de map Wachtwoorden. (Een oudere back-up kan een
+     wachtwoorden_*.7z bevatten: pak die eerst uit met 7-Zip en het archiefwachtwoord.)
    - Importeer de CSV in de browser (chrome://password-manager/settings > Importeren,
-     edge://settings/passwords > Importeren) of in je wachtwoordmanager.
-   - Verwijder de uitgepakte CSV daarna meteen.
+     edge://settings/autofill/passwords > ... > Importeren) of in je wachtwoordmanager.
+   - Verwijder de CSV daarna meteen.
 
 6. Bestanden
    - Home\<map> terugzetten, bijvoorbeeld:
@@ -685,61 +685,6 @@ function Backup-Browsers {
 # Wachtwoorden
 # ---------------------------------------------------------------------------
 
-function Protect-Wachtwoorden([string]$Map) {
-    $csvs = @(Get-ChildItem -LiteralPath $Map -Filter *.csv -File -ErrorAction SilentlyContinue)
-    if (-not $csvs) { return }
-
-    Write-Host "  Gevonden: $($csvs.Name -join ', ')"
-    if ((Read-Host '  CSV-bestanden versleutelen met een wachtwoord? (J/n)') -match '^(n|nee|no)$') {
-        Write-Let 'Niet versleuteld: de wachtwoorden staan in LEESBARE TEKST in de back-up. Bewaar de schijf goed en verwijder de CSV-bestanden na het importeren.'
-        return
-    }
-
-    $7z = @((Get-Command 7z.exe -ErrorAction SilentlyContinue).Source,
-            "$env:ProgramFiles\7-Zip\7z.exe",
-            "${env:ProgramFiles(x86)}\7-Zip\7z.exe") |
-        Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-
-    if (-not $7z) {
-        Write-Let '7-Zip niet gevonden. De CSV-bestanden staan ONVERSLEUTELD in de back-up!'
-        if ((Get-Command winget -ErrorAction SilentlyContinue) -and (Read-JaNee '7-Zip nu installeren via winget?')) {
-            winget install --id 7zip.7zip -e --accept-source-agreements --accept-package-agreements
-            $7z = "$env:ProgramFiles\7-Zip\7z.exe"
-        }
-        if (-not $7z -or -not (Test-Path -LiteralPath $7z)) { return }
-    }
-
-    while ($true) {
-        $pw  = [Net.NetworkCredential]::new('', (Read-Host '  Wachtwoord voor het archief' -AsSecureString)).Password
-        $pw2 = [Net.NetworkCredential]::new('', (Read-Host '  Herhaal het wachtwoord' -AsSecureString)).Password
-        if (-not $pw) { Write-Let 'Leeg wachtwoord.'; continue }
-        if ($pw -ne $pw2) { Write-Let 'Komt niet overeen.'; continue }
-        break
-    }
-
-    # Het wachtwoord gaat via de invoer naar 7-Zip, niet als argument: Windows PowerShell 5.1 verminkt
-    # " en \ in argumenten. Met UTF-8 aan beide kanten komen ook tekens als é en € heel aan.
-    $archief = Join-Path $Map ('wachtwoorden_{0}.7z' -f (Get-Date -Format 'HHmmss'))
-    $oudeEncoding = $OutputEncoding
-    $OutputEncoding = [Text.UTF8Encoding]::new($false)
-    try {
-        $pw, $pw | & $7z a -sccUTF-8 -t7z -mhe=on -p $archief $csvs.FullName | Out-Null
-        $ok = $LASTEXITCODE -eq 0
-        if ($ok) { $pw | & $7z t -sccUTF-8 $archief | Out-Null; $ok = $LASTEXITCODE -eq 0 }
-    } finally {
-        $OutputEncoding = $oudeEncoding
-    }
-    $pw = $null; $pw2 = $null
-
-    if ($ok) {
-        $csvs | Remove-Item -Force
-        Write-Ok "Versleuteld naar $(Split-Path $archief -Leaf); de CSV-bestanden zijn verwijderd."
-        Write-Let 'Bewaar het archiefwachtwoord NIET bij de back-up (bijvoorbeeld op papier of in je wachtwoordmanager).'
-    } else {
-        Write-Fout '7-Zip is mislukt; de CSV-bestanden zijn NIET verwijderd.'
-    }
-}
-
 # Wachtwoord-export automatisch aansturen met UI Automation en een paar Win32-functies. Getest op
 # Windows 10 22H2 met Edge en Chrome 155. Wat daarbij bleek:
 # - chrome://- en edge://-adressen op de opdrachtregel worden genegeerd. Het script opent daarom een
@@ -954,7 +899,9 @@ function Export-Wachtwoorden {
     if (Test-Path -LiteralPath (Join-Path $env:APPDATA 'Mozilla\Firefox\Profiles')) {
         Write-Host '  Firefox: de wachtwoorden gaan mee met de profielkopie (stap Browsers). Heb je een hoofdwachtwoord ingesteld? Dan heb je dat op de nieuwe laptop weer nodig.'
     }
-    Protect-Wachtwoorden $map
+    if ((Get-NieuweCsv $map @()).Count) {
+        Write-Let "De wachtwoorden staan in LEESBARE TEKST in $map. Bewaar de back-up goed en verwijder ze na het importeren."
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -2328,16 +2275,16 @@ function Show-WachtwoordHerstel {
         Write-Let 'Geen geëxporteerde wachtwoorden in deze back-up (Firefox-wachtwoorden zitten in het profiel).'
         return
     }
-    if ($csvs) { Write-Let 'Er staan ONVERSLEUTELDE CSV-bestanden in de back-up. Verwijder ze na het importeren.' }
+    if ($csvs) { Write-Host "  CSV-bestanden: $($csvs.Name -join ', ')" }
+    if ($archieven) { Write-Host '  Oudere back-up: pak het .7z-archief eerst uit met 7-Zip (met het archiefwachtwoord).' }
     Write-Host @'
-  Wachtwoorden importeren gaat met de hand, zodat ze niet onversleuteld blijven rondslingeren:
-  1. Pak het .7z-archief uit met 7-Zip (met het archiefwachtwoord), bijvoorbeeld naar je Bureaublad.
-  2. Importeer de CSV:
+  Wachtwoorden importeren gaat met de hand:
+  1. Importeer de CSV:
      - Chrome:  chrome://password-manager/settings > Wachtwoorden importeren
-     - Edge:    edge://settings/passwords > Importeren
+     - Edge:    edge://settings/autofill/passwords > meer weergeven (...) > Wachtwoorden importeren
      - Firefox: about:logins > menu (...) > Importeren uit een bestand
      - of in je wachtwoordmanager (Bitwarden, KeePassXC).
-  3. Verwijder de uitgepakte CSV meteen en leeg de prullenbak.
+  2. Verwijder de CSV daarna meteen en leeg de prullenbak.
 '@
     if (Read-JaNee 'De map met wachtwoorden nu openen?') { Invoke-Item -LiteralPath $map }
 }
@@ -2407,7 +2354,7 @@ function Show-Menu {
         Write-Host '  1. Alles achter elkaar'
         Write-Host "  2. Programma's inventariseren"
         Write-Host '  3. Browsers: bladwijzers, instellingen, extensies'
-        Write-Host '  4. Wachtwoorden exporteren (begeleid, versleuteld)'
+        Write-Host '  4. Wachtwoorden exporteren (automatisch, naar CSV)'
         Write-Host '  5. Programma-instellingen (Outlook, Office, VS Code, ...)'
         Write-Host '  6. Home-map scannen'
         Write-Host '  7. Home-map kopiëren'
