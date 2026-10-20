@@ -818,8 +818,15 @@ function script:Uia-Dialoog([string]$ClassName, [int]$TimeoutMs) {
 # Stuurt via UI Automation de wachtwoord-export van een Chromium-browser aan. De gebruiker hoeft
 # alleen nog zijn pincode in te vullen bij de Windows-beveiligingsprompt. Geeft $true terug als de
 # CSV er daadwerkelijk staat; $false betekent: terugvallen op de handmatige stappen.
+# Welke CSV-bestanden er sinds $Bestaand in $Map bij zijn gekomen. Zo maakt de standaard-
+# bestandsnaam van de browser niet uit (Edge slaat in het NL op als 'Microsoft Edge-wachtwoorden.csv').
+function script:Get-NieuweCsv([string]$Map, [string[]]$Bestaand) {
+    @(Get-ChildItem -LiteralPath $Map -Filter *.csv -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin $Bestaand })
+}
+
 function Invoke-ChromiumExport {
-    param([hashtable]$B, [string]$Csv, $Proc)
+    param([hashtable]$B, [string]$Csv, $Proc, [string]$Map, [string[]]$Bestaand)
     try { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction Stop } catch { return $false }
     $btnMi = @([System.Windows.Automation.ControlType]::Button, [System.Windows.Automation.ControlType]::MenuItem)
     $doel = Uia-DoelVensters $Proc
@@ -849,7 +856,7 @@ function Invoke-ChromiumExport {
 
     # 4. Wachten op het opslagvenster en het volledige pad invullen, daarna opslaan.
     $dlg = Uia-Dialoog '#32770' 120000
-    if (-not $dlg) { return (Test-Path -LiteralPath $Csv) }
+    if (-not $dlg) { return ((Get-NieuweCsv $Map $Bestaand).Count -gt 0) }
     $edit = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Edit) $script:UiaNamen.Bestandsnaam 5000
     if (-not $edit) { $edit = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Edit) '.' 3000 }
     if ($edit) {
@@ -859,10 +866,10 @@ function Invoke-ChromiumExport {
     $opslaan = Uia-Find $dlg @([System.Windows.Automation.ControlType]::Button) $script:UiaNamen.Opslaan 4000
     if ($opslaan) { [void](Uia-Klik $opslaan) }
 
-    # 5. Wachten tot het bestand er echt staat.
+    # 5. Wachten tot er een nieuw CSV-bestand verschijnt (welke naam de browser ook kiest).
     $deadline = [DateTime]::Now.AddSeconds(20)
-    while ([DateTime]::Now -lt $deadline -and -not (Test-Path -LiteralPath $Csv)) { Start-Sleep -Milliseconds 400 }
-    return (Test-Path -LiteralPath $Csv)
+    while ([DateTime]::Now -lt $deadline -and (Get-NieuweCsv $Map $Bestaand).Count -eq 0) { Start-Sleep -Milliseconds 400 }
+    return ((Get-NieuweCsv $Map $Bestaand).Count -gt 0)
 }
 
 function Export-Wachtwoorden {
@@ -877,6 +884,10 @@ function Export-Wachtwoorden {
         if (-not (Read-JaNee "Wachtwoorden exporteren uit $($b.Naam)?")) { continue }
 
         $csv = Join-Path $map "$($b.Naam)-wachtwoorden.csv"
+        # Momentopname vooraf: alles wat hierna aan CSV's verschijnt, is deze export (ongeacht de naam
+        # die de browser kiest, zoals 'Microsoft Edge-wachtwoorden.csv' in het Nederlands).
+        $bestaand = @(Get-ChildItem -LiteralPath $map -Filter *.csv -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+
         $proc = $null
         try { $proc = Start-Process -FilePath $b.Proces -ArgumentList $b.Ww -PassThru }
         catch { Write-Let "Kon $($b.Naam) niet starten; open hem zelf."; Set-Clipboard -Value $b.Ww }
@@ -884,23 +895,25 @@ function Export-Wachtwoorden {
         Start-Sleep -Seconds 4
 
         $gelukt = $false
-        try { $gelukt = Invoke-ChromiumExport -B $b -Csv $csv -Proc $proc } catch { $gelukt = $false }
+        try { $gelukt = Invoke-ChromiumExport -B $b -Csv $csv -Proc $proc -Map $map -Bestaand $bestaand } catch { $gelukt = $false }
 
-        if (-not $gelukt -and -not (Test-Path -LiteralPath $csv)) {
+        if (-not $gelukt -and (Get-NieuweCsv $map $bestaand).Count -eq 0) {
             # Automatisch klikken sloeg niet aan (andere versie/taal): terug naar de handmatige stappen.
             Write-Let 'Automatisch starten lukte niet; doe de export even met de hand:'
             Set-Clipboard -Value $b.Ww
             Write-Host "  1. Het adres $($b.Ww) staat op je klembord. Plak het in de adresbalk als de pagina niet vanzelf opent."
             Write-Host "  2. Kies 'Wachtwoorden exporteren/downloaden' en bevestig met je Windows-pincode of -wachtwoord."
             [void](Read-Host '  3. Druk op Enter zodra het venster om op te slaan open is')
-            Set-Clipboard -Value $csv
-            Write-Host '  4. Het opslagpad staat nu op je klembord. Plak het in het veld voor de bestandsnaam:'
-            Write-Host "     $csv" -ForegroundColor White
+            Write-Host "  4. Sla het op in deze map (de standaard bestandsnaam van de browser is prima):"
+            Write-Host "     $map" -ForegroundColor White
+            Set-Clipboard -Value $map
+            Write-Host '     Het mappad staat op je klembord; plak het bovenin de adresbalk van het opslagvenster.'
             [void](Read-Host '  5. Druk op Enter als het bestand is opgeslagen')
         }
 
-        if (Test-Path -LiteralPath $csv) { Write-Ok "$($b.Naam): opgeslagen" }
-        else { Write-Let "$($b.Naam): $csv niet gevonden. Heb je een andere naam of map gekozen? Zet het bestand dan zelf in $map." }
+        $nieuw = Get-NieuweCsv $map $bestaand
+        if ($nieuw.Count -gt 0) { Write-Ok "$($b.Naam): opgeslagen ($($nieuw.Name -join ', '))" }
+        else { Write-Let "$($b.Naam): geen nieuw CSV-bestand gevonden in $map. Heb je het ergens anders opgeslagen? Zet het dan zelf in deze map." }
     }
     Set-Clipboard -Value ' '
 
