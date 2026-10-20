@@ -2373,6 +2373,32 @@ function script:Test-BrowserAanwezig([hashtable]$B) {
     return (Test-Path -LiteralPath $B.Data)
 }
 
+# Importeert één CSV in een browser: automatisch, en anders met handmatige stappen
+function script:Import-WachtwoordCsv([hashtable]$B, $Csv) {
+    # Een nog nooit gestarte browser toont eerst welkomstschermen; die gaan voor
+    if (-not (Test-Path -LiteralPath (Join-Path $B.Data 'First Run'))) {
+        Write-Let "$($B.Naam) is op deze laptop nog niet eerder gestart."
+        try { Start-Process -FilePath $B.Proces } catch { }
+        [void](Read-Host "  Doorloop de welkomstschermen van $($B.Naam) en druk dan op Enter")
+    }
+
+    Write-Host "  $($Csv.Name): $($B.Naam) wordt geopend en de import wordt automatisch gestart. Klik niet in het browservenster tot het klaar is."
+    $gelukt = $false
+    try { $gelukt = Invoke-ChromiumImport -B $B -Csv $Csv.FullName }
+    catch { $gelukt = $false; $script:AutoFout = $_.Exception.Message }
+
+    if ($gelukt) {
+        Write-Ok "$($B.Naam): $script:ImportMelding"
+    } else {
+        Write-Let "Automatisch importeren lukte niet ($script:AutoFout); doe het even met de hand:"
+        Set-Clipboard -Value $B.Ww
+        Write-Host "  1. Het adres $($B.Ww) staat op je klembord. Plak het in de adresbalk van $($B.Naam)."
+        Write-Host "  2. Kies 'Wachtwoorden importeren' en daarna dit bestand:"
+        Write-Host "     $($Csv.FullName)" -ForegroundColor White
+        [void](Read-Host '  3. Druk op Enter als het importeren klaar is')
+    }
+}
+
 function Restore-Wachtwoorden {
     $bron = Open-Backup
     Write-Kop 'Wachtwoorden importeren'
@@ -2395,35 +2421,51 @@ function Restore-Wachtwoorden {
         return
     }
 
-    foreach ($csv in $csvs) {
-        # De browser raden aan de bestandsnaam ('Chrome-wachtwoorden.csv', 'Microsoft Edge-wachtwoorden.csv')
-        $voorstel = @($browsers | Where-Object { $csv.Name -match [regex]::Escape($_.Naam) } | Select-Object -First 1)
-        $kandidaten = if ($voorstel) { $voorstel } else { $browsers }
-        foreach ($b in $kandidaten) {
+    # Dubbele bestanden (zelfde inhoud, bijv. 'Edge-wachtwoorden.csv' en 'Microsoft Edge-wachtwoorden.csv')
+    # maar één keer importeren
+    $gezien = @{}
+    $uniek = @(foreach ($csv in $csvs) {
+        $hash = (Get-FileHash -LiteralPath $csv.FullName -Algorithm SHA256).Hash
+        if ($gezien.ContainsKey($hash)) {
+            Write-Host "  $($csv.Name) is gelijk aan $($gezien[$hash]); die wordt maar één keer geïmporteerd."
+            continue
+        }
+        $gezien[$hash] = $csv.Name
+        $csv
+    })
+
+    # De browser raden aan de bestandsnaam ('Chrome-wachtwoorden.csv', 'Microsoft Edge-wachtwoorden.csv');
+    # één vraag per browser, ook als er meerdere bestanden voor zijn
+    $perBrowser = [ordered]@{}
+    $zonderBrowser = @()
+    $nietAanwezig = @()
+    foreach ($csv in $uniek) {
+        $herkomst = $script:Chromium | Where-Object { $csv.Name -match [regex]::Escape($_.Naam) } | Select-Object -First 1
+        $b = $browsers | Where-Object { $herkomst -and $_.Naam -eq $herkomst.Naam } | Select-Object -First 1
+        if ($herkomst -and -not $b) { $nietAanwezig += [pscustomobject]@{ Csv = $csv; Van = $herkomst.Naam }; continue }
+        if (-not $b) { $zonderBrowser += $csv; continue }
+        if (-not $perBrowser.Contains($b.Naam)) { $perBrowser[$b.Naam] = @{ B = $b; Csvs = @() } }
+        $perBrowser[$b.Naam].Csvs += $csv
+    }
+    foreach ($groep in $perBrowser.Values) {
+        $namen = ($groep.Csvs | ForEach-Object { $_.Name }) -join ', '
+        if (-not (Read-JaNee "Wachtwoorden uit $namen importeren in $($groep.B.Naam)?")) { continue }
+        foreach ($csv in $groep.Csvs) { Import-WachtwoordCsv $groep.B $csv }
+    }
+    # Bestanden uit een browser die hier (nog) niet staat: dat eerst zeggen, dan pas een andere browser aanbieden
+    foreach ($n in $nietAanwezig) {
+        Write-Let "$($n.Csv.Name) komt uit $($n.Van), maar $($n.Van) staat niet op deze laptop. Installeer $($n.Van) eerst (stap Programma's) en draai deze stap opnieuw om ze daar te importeren."
+        foreach ($b in $browsers) {
+            if (-not (Read-JaNee "De wachtwoorden uit $($n.Van) toch importeren in $($b.Naam)?")) { continue }
+            Import-WachtwoordCsv $b $n.Csv
+            break
+        }
+    }
+    # Bestanden zonder herkenbare browsernaam: per browser vragen
+    foreach ($csv in $zonderBrowser) {
+        foreach ($b in $browsers) {
             if (-not (Read-JaNee "Wachtwoorden uit $($csv.Name) importeren in $($b.Naam)?")) { continue }
-
-            # Een nog nooit gestarte browser toont eerst welkomstschermen; die gaan voor
-            if (-not (Test-Path -LiteralPath (Join-Path $b.Data 'First Run'))) {
-                Write-Let "$($b.Naam) is op deze laptop nog niet eerder gestart."
-                try { Start-Process -FilePath $b.Proces } catch { }
-                [void](Read-Host "  Doorloop de welkomstschermen van $($b.Naam) en druk dan op Enter")
-            }
-
-            Write-Host "  $($b.Naam) wordt geopend en de import wordt automatisch gestart. Klik niet in het browservenster tot het klaar is."
-            $gelukt = $false
-            try { $gelukt = Invoke-ChromiumImport -B $b -Csv $csv.FullName }
-            catch { $gelukt = $false; $script:AutoFout = $_.Exception.Message }
-
-            if ($gelukt) {
-                Write-Ok "$($b.Naam): $script:ImportMelding"
-            } else {
-                Write-Let "Automatisch importeren lukte niet ($script:AutoFout); doe het even met de hand:"
-                Set-Clipboard -Value $b.Ww
-                Write-Host "  1. Het adres $($b.Ww) staat op je klembord. Plak het in de adresbalk van $($b.Naam)."
-                Write-Host "  2. Kies 'Wachtwoorden importeren' en daarna dit bestand:"
-                Write-Host "     $($csv.FullName)" -ForegroundColor White
-                [void](Read-Host '  3. Druk op Enter als het importeren klaar is')
-            }
+            Import-WachtwoordCsv $b $csv
             break
         }
     }
