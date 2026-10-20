@@ -60,9 +60,9 @@ gebruiker die het start, dus start het als de gebruiker wiens gegevens je wilt m
 ## Herstellen op een nieuwe Windows-laptop
 
 Het script kopieert zichzelf naar de back-upmap. Start het daar op de nieuwe laptop; het biedt dan zelf
-aan om te herstellen. Het installeert de programma's met `winget` (je kiest welke) en zet instellingen,
-bladwijzers, het Firefox-profiel en je bestanden terug. Bestanden die op de nieuwe laptop nieuwer zijn,
-blijven staan.
+aan om te herstellen. Het installeert de programma's met `winget` (je kiest welke), biedt ESET Security
+aan als virusscanner en zet instellingen, bladwijzers, het Firefox-profiel en je bestanden terug.
+Bestanden die op de nieuwe laptop nieuwer zijn, blijven staan.
 
 ## Overstappen naar Linux
 

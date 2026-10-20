@@ -249,6 +249,7 @@ bestanden terug. Hieronder staat hoe je alles met de hand doet.
    - winget-apps.json:  winget import -i winget-apps.json --accept-package-agreements
    - winget-niet-beschikbaar.txt: deze programma's staan niet in winget en moet je zelf installeren.
    - programmas.csv: de volledige lijst met versies en uitgevers (opent in Excel).
+   - ESET Security (virusscanner):  winget install --id=ESET.Security -e
 
 2. Bladwijzers
    - Browsers\<browser>\<profiel>\bladwijzers.html: in elke browser te importeren via
@@ -2004,6 +2005,24 @@ function Restore-Programmas {
         Write-Host "  Deze programma's stonden niet in winget; installeer ze zelf:"
         Get-Content -LiteralPath $niet -Encoding UTF8 | ForEach-Object { Write-Host "    $_" }
     }
+
+    Install-Eset
+}
+
+# Biedt ESET Security (virusscanner) aan via winget, tenzij hij er al op staat. Activeren gaat daarna
+# in ESET zelf, met een ESET HOME-account of licentiesleutel.
+function Install-Eset {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Let 'ESET Security: winget ontbreekt. Installeer App Installer uit de Microsoft Store, of download ESET via eset.com.'
+        return
+    }
+    & winget list --id ESET.Security -e --accept-source-agreements *> $null
+    if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security staat er al op.'; return }
+    Write-Host ''
+    if (-not (Read-JaNee 'ESET Security (virusscanner) installeren?')) { return }
+    & winget install --id=ESET.Security -e --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security is geïnstalleerd. Activeer hem met je ESET HOME-account of licentiesleutel.' }
+    else { Write-Let "ESET Security installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven." }
 }
 
 function Restore-Instellingen {
