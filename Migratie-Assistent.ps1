@@ -62,6 +62,20 @@ $script:Chromium = @(
     @{ Naam = 'Opera';   Proces = 'opera';   Data = "$env:APPDATA\Opera Software\Opera Stable";                Ww = 'opera://settings/passwords'; Winget = 'Opera.Opera' }
 )
 
+# Software voor 'Configureren > Software installeren' (winget). TaalId: aparte taalpakketten, waarbij
+# {taal} de taal van Windows wordt (nl-NL of nl); het gewone Firefox-pakket is alleen Engels.
+$script:Software = @(
+    @{ Groep = 'Beveiliging';     Naam = 'ESET Security';        Id = 'ESET.Security' }
+    @{ Groep = 'Browsers';        Naam = 'Google Chrome';        Id = 'Google.Chrome' }
+    @{ Groep = 'Browsers';        Naam = 'Mozilla Firefox';      Id = 'Mozilla.Firefox'; TaalId = 'Mozilla.Firefox.{taal}' }
+    @{ Groep = 'Browsers';        Naam = 'Brave';                Id = 'Brave.Brave' }
+    @{ Groep = 'Basis';           Naam = '7-Zip';                Id = '7zip.7zip' }
+    @{ Groep = 'Basis';           Naam = 'VLC';                  Id = 'VideoLAN.VLC' }
+    @{ Groep = 'Basis';           Naam = 'Adobe Acrobat Reader'; Id = 'Adobe.Acrobat.Reader.64-bit' }
+    @{ Groep = 'Basis';           Naam = 'Notepad++';            Id = 'Notepad++.Notepad++' }
+    @{ Groep = 'Hulp op afstand'; Naam = 'AnyDesk';              Id = 'AnyDesk.AnyDesk' }
+)
+
 # Bestanden per Chromium-profiel die de moeite waard zijn. 'Login Data' (wachtwoorden) en
 # 'Secure Preferences' zijn aan deze Windows-installatie gebonden en hebben elders geen zin.
 $script:ChromiumBestanden = @('Bookmarks', 'Bookmarks.bak', 'Preferences', 'History', 'Favicons',
@@ -1943,6 +1957,98 @@ function Get-SshSessies {
     return $sb.ToString()
 }
 
+# ---------------------------------------------------------------------------
+# Configureren
+# ---------------------------------------------------------------------------
+
+# Installeert een winget-pakket, in de weergavetaal van Windows als dat kan: eerst een apart taalpakket
+# ($TaalId, bijv. 'Mozilla.Firefox.{taal}'), dan een installatiebestand voor die taal (--locale), anders
+# het gewone pakket (Chrome, ESET en 7-Zip hebben geen taalversies en volgen zelf de taal van Windows).
+# -1978335216 = APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER.
+function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Let "$($Naam): winget ontbreekt. Installeer App Installer uit de Microsoft Store."
+        return $false
+    }
+    $cultuur = Get-UICulture
+    $poging = $null
+    if ($TaalId) {
+        foreach ($t in $cultuur.Name, $cultuur.TwoLetterISOLanguageName) {
+            $kandidaat = $TaalId -replace '\{taal\}', $t
+            & winget show --id $kandidaat -e --accept-source-agreements *> $null
+            if ($LASTEXITCODE -eq 0) { $poging = @('--id', $kandidaat, '-e'); break }
+        }
+    }
+    if (-not $poging) { $poging = @('--id', $Id, '-e', '--locale', $cultuur.Name) }
+    Write-Host "  $($Naam): winget install $($poging -join ' ')"
+    & winget install @poging --accept-package-agreements --accept-source-agreements
+    # Geen installatiebestand in deze taal (winget show zegt dat niet betrouwbaar vooraf): dan het gewone
+    if ($LASTEXITCODE -eq -1978335216 -and $poging -contains '--locale') {
+        Write-Host "  Geen aparte versie in $($cultuur.Name); de gewone versie volgt de taal van Windows."
+        & winget install --id $Id -e --accept-package-agreements --accept-source-agreements
+    }
+    if ($LASTEXITCODE -eq 0) { Write-Ok "$Naam is geïnstalleerd."; return $true }
+    Write-Let "$Naam installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven."
+    return $false
+}
+
+# Staat dit pakket (of een taalversie ervan) er al op?
+function script:Test-WingetPakket([hashtable]$S) {
+    $ids = @($S.Id)
+    if ($S.TaalId) {
+        $c = Get-UICulture
+        $ids += ($S.TaalId -replace '\{taal\}', $c.Name), ($S.TaalId -replace '\{taal\}', $c.TwoLetterISOLanguageName)
+    }
+    foreach ($i in $ids) {
+        & winget list --id $i -e --accept-source-agreements *> $null
+        if ($LASTEXITCODE -eq 0) { return $true }
+    }
+    return $false
+}
+
+function Install-Software {
+    Write-Kop 'Software installeren'
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Let 'winget ontbreekt. Installeer of update App Installer uit de Microsoft Store en probeer het opnieuw.'
+        return
+    }
+    Write-Host '  Kijken wat er al op staat...'
+    $items = @(foreach ($s in $script:Software) {
+        [pscustomobject]@{ Groep = $s.Groep; Naam = $s.Naam; Status = $(if (Test-WingetPakket $s) { 'staat erop' } else { '' }); Software = $s }
+    })
+    $keuze = @(Select-Items -Items $items -Titel 'Welke software installeren?' -Kolommen @('Groep', 'Naam', 'Status'))
+    if (-not $keuze) { Write-Let 'Niets gekozen.'; return }
+
+    foreach ($k in $keuze) {
+        if ($k.Status) { Write-Ok "$($k.Naam) staat er al op."; continue }
+        if (Install-WingetPakket -Id $k.Software.Id -Naam $k.Naam -TaalId $k.Software.TaalId) {
+            if ($k.Software.Id -eq 'ESET.Security') { Write-Let 'Activeer ESET met je ESET HOME-account of licentiesleutel.' }
+        }
+    }
+    Update-Pad
+}
+
+# Chris Titus Tech's Windows Utility (github.com/ChrisTitusTech/winutil): Windows-instellingen, tweaks,
+# programma's en updates in één venster. Draait als beheerder in een eigen PowerShell-venster.
+function Start-WinUtil {
+    Write-Kop 'Chris Titus WinUtil'
+    Write-Host '  WinUtil is een los hulpprogramma van Chris Titus Tech (github.com/ChrisTitusTech/winutil).'
+    Write-Host '  Het wordt van GitHub gedownload en als beheerder gestart; Windows vraagt daarvoor toestemming.'
+    if (-not (Read-JaNee 'WinUtil nu starten?')) { return }
+    $cmd = '[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; ' +
+        'irm https://github.com/ChrisTitusTech/winutil/releases/latest/download/winutil.ps1 | iex'
+    try {
+        Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd
+        Write-Ok 'WinUtil wordt gestart in een eigen venster.'
+    } catch {
+        Write-Let "WinUtil is niet gestart: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Linux
+# ---------------------------------------------------------------------------
+
 function Export-LinuxPlan {
     $run = Get-RunMap
     Write-Kop 'Voorbereiden op Linux'
@@ -1995,6 +2101,11 @@ function Export-LinuxPlan {
     if (-not (Test-Path -LiteralPath (Join-Path $run 'Home'))) {
         Write-Let 'Vergeet de stappen Browsers, Programma-instellingen en Home-map kopiëren niet; het herstelscript gebruikt die.'
     }
+    Write-Host ''
+    Write-Host '  Op de Linux-pc, met de back-up aangesloten, in een terminal:'
+    Write-Host "    bash /pad/naar/$(Split-Path $run -Leaf)/Linux/herstel-linux.sh" -ForegroundColor White
+    Write-Host '  of altijd de nieuwste versie:'
+    Write-Host "    bash <(curl -fsSL https://github.com/xam464/windows-migratie-script/releases/latest/download/herstel-linux.sh) /pad/naar/$(Split-Path $run -Leaf)" -ForegroundColor White
 }
 
 # ---------------------------------------------------------------------------
@@ -2373,22 +2484,10 @@ function script:Test-BrowserAanwezig([hashtable]$B) {
     return (Test-Path -LiteralPath $B.Data)
 }
 
-# Installeert een browser via winget, in de weergavetaal van Windows als het pakket die taal heeft. Heeft
-# het pakket geen aparte taalversies (zoals Chrome), dan het gewone, dat zelf de taal van Windows volgt.
+# Installeert een browser via winget, in de taal van Windows (zie Install-WingetPakket)
 function script:Install-Browser([hashtable]$B) {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Let "winget ontbreekt; installeer $($B.Naam) zelf of installeer App Installer uit de Microsoft Store."
-        return $false
-    }
-    $taal = (Get-UICulture).Name
-    & winget install --id $B.Winget -e --locale $taal --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -ne 0 -and -not (Test-BrowserAanwezig $B)) {
-        Write-Host "  Geen aparte versie in $taal; de gewone versie volgt de taal van Windows."
-        & winget install --id $B.Winget -e --accept-package-agreements --accept-source-agreements
-    }
-    if (Test-BrowserAanwezig $B) { Write-Ok "$($B.Naam) is geïnstalleerd."; return $true }
-    Write-Let "$($B.Naam) installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven."
-    return $false
+    if (-not (Install-WingetPakket -Id $B.Winget -Naam $B.Naam)) { return $false }
+    return (Test-BrowserAanwezig $B)
 }
 
 # Importeert één CSV in een browser: automatisch, en anders met handmatige stappen
@@ -2525,7 +2624,7 @@ function Show-HerstelMenu {
         Write-Host '  4. Bladwijzers en Firefox-profiel terugzetten'
         Write-Host '  5. Bestanden terugzetten'
         Write-Host '  6. Wachtwoorden importeren in de browser'
-        Write-Host '  Q. Stoppen'
+        Write-Host '  Q. Terug'
         switch (Read-Host '  Keuze') {
             '1' { Invoke-HerstelAlles }
             '2' { Invoke-Stap { Restore-Programmas } }
@@ -2559,10 +2658,57 @@ function Invoke-Alles {
     if ($NaarLinux) { Invoke-Stap { Export-LinuxPlan } }
 }
 
-function Show-Menu {
+function Show-HoofdMenu {
     while ($true) {
         Write-Host ''
         Write-Host '  ==== Windows Migratie-Assistent ====' -ForegroundColor Cyan
+        Write-Host '  1. Back-up maken (op de oude pc)'
+        Write-Host '  2. Herstellen'
+        Write-Host '  3. Configureren (software, Windows-instellingen)'
+        Write-Host '  Q. Stoppen'
+        switch (Read-Host '  Keuze') {
+            '1' { Show-BackupMenu }
+            '2' { Show-HerstelKeuze }
+            '3' { Show-ConfigMenu }
+            'q' { return }
+        }
+    }
+}
+
+function Show-HerstelKeuze {
+    while ($true) {
+        Write-Host ''
+        Write-Host '  ==== Herstellen ====' -ForegroundColor Cyan
+        Write-Host '  1. Windows: deze laptop herstellen vanuit een back-up'
+        Write-Host '  2. Linux: back-up klaarmaken voor een Linux-pc (op de oude pc)'
+        Write-Host '  Q. Terug'
+        switch (Read-Host '  Keuze') {
+            '1' { Show-HerstelMenu }
+            '2' { Invoke-Stap { Export-LinuxPlan } }
+            'q' { return }
+        }
+    }
+}
+
+function Show-ConfigMenu {
+    while ($true) {
+        Write-Host ''
+        Write-Host '  ==== Configureren ====' -ForegroundColor Cyan
+        Write-Host '  1. Software installeren (ESET, browsers, basisprogramma''s, AnyDesk)'
+        Write-Host '  2. Chris Titus WinUtil starten (Windows-instellingen en tweaks)'
+        Write-Host '  Q. Terug'
+        switch (Read-Host '  Keuze') {
+            '1' { Invoke-Stap { Install-Software } }
+            '2' { Invoke-Stap { Start-WinUtil } }
+            'q' { return }
+        }
+    }
+}
+
+function Show-BackupMenu {
+    while ($true) {
+        Write-Host ''
+        Write-Host '  ==== Back-up maken ====' -ForegroundColor Cyan
         if ($script:Run) { Write-Host "  Back-upmap: $script:Run" -ForegroundColor DarkGray }
         Write-Host '  1. Alles achter elkaar'
         Write-Host "  2. Programma's inventariseren"
@@ -2572,9 +2718,7 @@ function Show-Menu {
         Write-Host '  6. Home-map scannen'
         Write-Host '  7. Home-map kopiëren'
         Write-Host '  8. Rapport openen'
-        Write-Host '  L. Voorbereiden op Linux (nieuwe computer wordt een Linux-pc)'
-        Write-Host '  H. Herstellen op deze laptop (vanuit een back-up)'
-        Write-Host '  Q. Stoppen'
+        Write-Host '  Q. Terug'
         switch (Read-Host '  Keuze') {
             '1' { Invoke-Alles }
             '2' { Invoke-Stap { Export-Programmas } }
@@ -2587,8 +2731,6 @@ function Show-Menu {
                 if ($script:Run) { Invoke-Item (Join-Path $script:Run 'rapport.html') }
                 else { Write-Let 'Er is nog geen rapport; voer eerst een stap uit.' }
             }
-            'l' { Invoke-Stap { Export-LinuxPlan } }
-            'h' { Show-HerstelMenu; return }
             'q' { return }
         }
     }
@@ -2608,7 +2750,7 @@ if (-not $Herstel -and -not $Doel -and $PSScriptRoot -and (Test-Path -LiteralPat
 try {
     if ($Herstel) {
         if ($Alles) { Invoke-HerstelAlles } else { Show-HerstelMenu }
-    } elseif ($Alles) { Invoke-Alles } else { Show-Menu }
+    } elseif ($Alles) { Invoke-Alles } else { Show-HoofdMenu }
 } finally {
     Save-Rapport
     if ($script:Run -or $script:Bron) { try { Stop-Transcript | Out-Null } catch { } }
