@@ -370,6 +370,9 @@ function Get-RunMap {
     return $script:Run
 }
 
+# Kolomkoppen voor eigenschappen met een technische naam
+$script:KolomKoppen = @{ GrootteTekst = 'Grootte' }
+
 # Laat de gebruiker items kiezen: een keuzelijst in het venster, anders een genummerde lijst
 function Select-Items {
     param(
@@ -388,13 +391,17 @@ function Select-Items {
             foreach ($item in $Items) { $lijst.Add([bool]@($item | Where-Object $Voorstel).Count) }
             $standaard = $lijst.ToArray()
         }
-        $nrs = [MigratieGui.Venster]::Kiezen($Titel, [string[]]$Kolommen, $rijen.ToArray(), $standaard)
+        $koppen = [string[]]@(foreach ($k in $Kolommen) { if ($script:KolomKoppen[$k]) { $script:KolomKoppen[$k] } else { $k } })
+        $nrs = [MigratieGui.Venster]::Kiezen($Titel, $koppen, $rijen.ToArray(), $standaard)
         return @(foreach ($n in $nrs) { $Items[$n] })
     }
 
     $nr = 0
     foreach ($item in $Items) { $nr++; $item | Add-Member -NotePropertyName Nr -NotePropertyValue $nr -Force }
-    $Items | Format-Table -Property (@('Nr') + $Kolommen) -AutoSize | Out-Host
+    $eigenschappen = @('Nr') + @(foreach ($k in $Kolommen) {
+        if ($script:KolomKoppen[$k]) { @{ Name = $script:KolomKoppen[$k]; Expression = [scriptblock]::Create("`$_.$k") } } else { $k }
+    })
+    $Items | Format-Table -Property $eigenschappen -AutoSize | Out-Host
 
     $hint = "nummers (bijv. 1,3,5-7), 'a' = alles"
     if ($Voorstel) { $hint += ", 'v' = voorstel" }
