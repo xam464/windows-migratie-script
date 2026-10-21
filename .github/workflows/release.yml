@@ -50,3 +50,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" Migratie-Assistent.ps1 start.ps1 herstel-linux.sh --clobber
+
+      # Pas nu de bestanden eraan hangen, mag releases/latest naar deze release wijzen. Vink bij het
+      # maken van de release 'Set as the latest release' uit; anders wijst die link de eerste seconden
+      # naar een release zonder bestanden.
+      - name: Als nieuwste markeren
+        if: ${{ !github.event.release.prerelease }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ github.event.release.tag_name }}" --latest
