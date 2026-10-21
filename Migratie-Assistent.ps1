@@ -23,14 +23,18 @@
     Doelmap: externe schijf of NAS-share. Zonder parameter wordt erom gevraagd.
 .PARAMETER Herstel
     Back-upmap (Migratie_<PC>_<datum>) om op deze laptop terug te zetten.
+.PARAMETER Cli
+    De tekstversie met menu's in de console in plaats van het venster.
 .PARAMETER Gui
-    Grafische dialogen gebruiken (mapkeuze, Out-GridView voor selecties).
+    Verouderd: het venster is nu de standaard. Wordt genegeerd.
 .PARAMETER Alles
     Alle stappen achter elkaar doorlopen, zonder menu.
 .PARAMETER NaarLinux
     De nieuwe computer wordt een Linux-pc: met -Alles komt de Linux-voorbereiding er aan het eind bij.
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\Migratie-Assistent.ps1 -Gui
+    powershell -ExecutionPolicy Bypass -File .\Migratie-Assistent.ps1
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .\Migratie-Assistent.ps1 -Cli
 .EXAMPLE
     .\Migratie-Assistent.ps1 -Doel E:\ -Alles
 .EXAMPLE
@@ -42,9 +46,12 @@
 param(
     [string]$Doel,
     [string]$Herstel,
+    [switch]$Cli,
     [switch]$Gui,
     [switch]$Alles,
-    [switch]$NaarLinux
+    [switch]$NaarLinux,
+    # Intern: het venster laadt het script hiermee in de achtergrond-runspace, zonder het menu te starten
+    [switch]$Worker
 )
 
 $ErrorActionPreference = 'Stop'
@@ -304,9 +311,10 @@ hand doet.
 # Hulpfuncties
 # ---------------------------------------------------------------------------
 
-function Write-Kop([string]$Tekst) { Write-Host ''; Write-Host "== $Tekst ==" -ForegroundColor Cyan }
-function Write-Ok([string]$Tekst)   { Write-Host "  [OK] $Tekst" -ForegroundColor Green }
-function Write-Let([string]$Tekst)  { Write-Host "  [!]  $Tekst" -ForegroundColor Yellow }
+# Write-Let onthoudt de waarschuwing: in het venster staat die als uitleg boven een vraag als 'Toch doorgaan?'
+function Write-Kop([string]$Tekst) { $script:Waarschuwing = $null; Write-Host ''; Write-Host "== $Tekst ==" -ForegroundColor Cyan }
+function Write-Ok([string]$Tekst)   { $script:Waarschuwing = $null; Write-Host "  [OK] $Tekst" -ForegroundColor Green }
+function Write-Let([string]$Tekst)  { $script:Waarschuwing = $Tekst; Write-Host "  [!]  $Tekst" -ForegroundColor Yellow }
 function Write-Fout([string]$Tekst) { Write-Host "  [X]  $Tekst" -ForegroundColor Red }
 
 function Format-Grootte([double]$Bytes) {
@@ -318,7 +326,17 @@ function Format-Grootte([double]$Bytes) {
 }
 
 function Read-JaNee([string]$Vraag) {
+    if ($script:GuiModus) {
+        $tekst = if ($script:Waarschuwing) { "$script:Waarschuwing`n`n$Vraag" } else { $Vraag }
+        $script:Waarschuwing = $null
+        return [MigratieGui.Venster]::JaNee($tekst)
+    }
     return (Read-Host "  $Vraag (j/N)") -match '^(j|ja|y|yes)$'
+}
+
+# Wacht tot de gebruiker iets met de hand gedaan heeft: Enter in de console, OK in het venster
+function Wait-Gebruiker([string]$Cli, [string]$Venster) {
+    if ($script:GuiModus) { [MigratieGui.Venster]::Melding($Venster) } else { [void](Read-Host $Cli) }
 }
 
 # Maakt (eenmalig) de back-upmap aan op de doellocatie
@@ -326,13 +344,9 @@ function Get-RunMap {
     if ($script:Run) { return $script:Run }
 
     if (-not $script:Doel) {
-        if ($Gui) {
-            Add-Type -AssemblyName System.Windows.Forms
-            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-            $dlg.Description = 'Kies de doellocatie voor de migratie-back-up (externe schijf of NAS)'
-            $dlg.ShowNewFolderButton = $true
-            if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { throw 'Geen doelmap gekozen.' }
-            $script:Doel = $dlg.SelectedPath
+        if ($script:GuiModus) {
+            $script:Doel = [MigratieGui.Venster]::Map('Kies waar de back-up komt (externe schijf of NAS)')
+            if (-not $script:Doel) { throw 'Geen doelmap gekozen.' }
         } else {
             $script:Doel = Read-Host '  Doelmap (bijv. E:\ of \\nas\backup)'
         }
@@ -347,7 +361,8 @@ function Get-RunMap {
 
     $naam = 'Migratie_{0}_{1}' -f $env:COMPUTERNAME, (Get-Date -Format 'yyyyMMdd_HHmm')
     $script:Run = (New-Item -ItemType Directory -Force -Path (Join-Path $volledig $naam)).FullName
-    try { Start-Transcript -Path (Join-Path $script:Run 'transcript.log') | Out-Null } catch { }
+    if ($script:GuiModus) { [MigratieGui.Venster]::LogBestand = Join-Path $script:Run 'transcript.log' }
+    else { try { Start-Transcript -Path (Join-Path $script:Run 'transcript.log') | Out-Null } catch { } }
     Set-Content -LiteralPath (Join-Path $script:Run 'HERSTELLEN.txt') -Value $script:HerstelTekst -Encoding UTF8
     # Het script zelf meenemen, zodat het op de nieuwe laptop de herstelmodus kan draaien
     if ($PSCommandPath) { Copy-Item -LiteralPath $PSCommandPath -Destination $script:Run -Force }
@@ -355,7 +370,10 @@ function Get-RunMap {
     return $script:Run
 }
 
-# Laat de gebruiker items kiezen: Out-GridView met -Gui, anders een genummerde lijst
+# Kolomkoppen voor eigenschappen met een technische naam
+$script:KolomKoppen = @{ GrootteTekst = 'Grootte' }
+
+# Laat de gebruiker items kiezen: een keuzelijst in het venster, anders een genummerde lijst
 function Select-Items {
     param(
         [object[]]$Items,
@@ -364,11 +382,26 @@ function Select-Items {
         [scriptblock]$Voorstel
     )
     if (-not $Items) { return @() }
-    if ($Gui) { return @($Items | Out-GridView -Title $Titel -OutputMode Multiple) }
+    if ($script:GuiModus) {
+        $rijen = New-Object 'System.Collections.Generic.List[string[]]'
+        foreach ($item in $Items) { $rijen.Add([string[]]@(foreach ($k in $Kolommen) { "$($item.$k)" })) }
+        $standaard = $null
+        if ($Voorstel) {
+            $lijst = New-Object 'System.Collections.Generic.List[bool]'
+            foreach ($item in $Items) { $lijst.Add([bool]@($item | Where-Object $Voorstel).Count) }
+            $standaard = $lijst.ToArray()
+        }
+        $koppen = [string[]]@(foreach ($k in $Kolommen) { if ($script:KolomKoppen[$k]) { $script:KolomKoppen[$k] } else { $k } })
+        $nrs = [MigratieGui.Venster]::Kiezen($Titel, $koppen, $rijen.ToArray(), $standaard)
+        return @(foreach ($n in $nrs) { $Items[$n] })
+    }
 
     $nr = 0
     foreach ($item in $Items) { $nr++; $item | Add-Member -NotePropertyName Nr -NotePropertyValue $nr -Force }
-    $Items | Format-Table -Property (@('Nr') + $Kolommen) -AutoSize | Out-Host
+    $eigenschappen = @('Nr') + @(foreach ($k in $Kolommen) {
+        if ($script:KolomKoppen[$k]) { @{ Name = $script:KolomKoppen[$k]; Expression = [scriptblock]::Create("`$_.$k") } } else { $k }
+    })
+    $Items | Format-Table -Property $eigenschappen -AutoSize | Out-Host
 
     $hint = "nummers (bijv. 1,3,5-7), 'a' = alles"
     if ($Voorstel) { $hint += ", 'v' = voorstel" }
@@ -513,7 +546,6 @@ function Export-Programmas {
         Write-Let 'winget is niet geïnstalleerd (App Installer uit de Store). Alleen programmas.csv gemaakt.'
     }
 
-    if ($Gui) { $alle | Out-GridView -Title "Geïnstalleerde programma's ($($alle.Count))" }
 }
 
 # ---------------------------------------------------------------------------
@@ -978,12 +1010,12 @@ function Export-Wachtwoorden {
             }
             Write-Host "  1. Het adres $($b.Ww) staat op je klembord. Plak het in de adresbalk van $($b.Naam)."
             Write-Host "  2. Kies 'Wachtwoorden exporteren/downloaden' en bevestig met je Windows-pincode of -wachtwoord."
-            [void](Read-Host '  3. Druk op Enter zodra het venster om op te slaan open is')
+            Wait-Gebruiker '  3. Druk op Enter zodra het venster om op te slaan open is' 'Klik op OK zodra het venster om op te slaan open is.'
             Write-Host "  4. Sla het op in deze map (de standaard bestandsnaam van de browser is prima):"
             Write-Host "     $map" -ForegroundColor White
             Set-Clipboard -Value $map
             Write-Host '     Het mappad staat op je klembord; plak het bovenin de adresbalk van het opslagvenster.'
-            [void](Read-Host '  5. Druk op Enter als het bestand is opgeslagen')
+            Wait-Gebruiker '  5. Druk op Enter als het bestand is opgeslagen' "Klik op OK als het bestand is opgeslagen in $map."
         }
 
         $nieuw = Get-NieuweCsv $map $bestaand
@@ -1206,7 +1238,7 @@ function Invoke-HomeScan {
     $script:Rapport.Home = $script:Scan
     $script:Rapport.Grootste = @($grootste | Sort-Object Bytes -Descending | Select-Object -First 20)
 
-    $script:Scan | Format-Table Map, GrootteTekst, Bestanden, Online, Advies -AutoSize | Out-Host
+    $script:Scan | Format-Table Map, GrootteTekst, Bestanden, Online, Advies -AutoSize | Out-String -Width 200 | Write-Host
     $totaal = ($script:Scan | Measure-Object Bytes -Sum).Sum
     $voorstel = ($script:Scan | Where-Object { $_.Advies -eq 'Kopiëren' } | Measure-Object Bytes -Sum).Sum
     Write-Host "  Totaal: $(Format-Grootte $totaal), waarvan voorgesteld om te kopiëren: $(Format-Grootte $voorstel)"
@@ -1214,7 +1246,7 @@ function Invoke-HomeScan {
     if ($script:Rapport.Grootste) {
         Write-Host ''
         Write-Host '  Grootste bestanden (>= 100 MB):'
-        $script:Rapport.Grootste | Select-Object -First 10 | Format-Table Grootte, Pad -AutoSize | Out-Host
+        $script:Rapport.Grootste | Select-Object -First 10 | Format-Table Grootte, Pad -AutoSize | Out-String -Width 200 | Write-Host
     }
 }
 
@@ -1961,11 +1993,56 @@ function Get-SshSessies {
 # Configureren
 # ---------------------------------------------------------------------------
 
+# winget-code voor 'de pakketbeschrijving is nieuwer dan deze winget kan lezen': op oudere Windows 10-
+# installaties is App Installer vaak te oud voor nieuwe pakketten (zoals ESET.Security).
+$script:WingetTeOud = -1978335225   # 0x8A150007 APPINSTALLER_CLI_ERROR_UNSUPPORTED_MANIFESTVERSION
+
+# Werkt winget (App Installer) bij met de nieuwste release van github.com/microsoft/winget-cli: het
+# pakket van Microsoft plus de afhankelijkheden voor deze processorarchitectuur.
+function Update-Winget {
+    Write-Host '  winget bijwerken met de nieuwste versie van github.com/microsoft/winget-cli...'
+    $map = Join-Path $env:TEMP 'migratie-winget'
+    New-Item -ItemType Directory -Force -Path $map | Out-Null
+    $oudeVoortgang = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $basis = 'https://github.com/microsoft/winget-cli/releases/latest/download'
+        $bundel = Join-Path $map 'appinstaller.msixbundle'
+        Invoke-WebRequest "$basis/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile $bundel -UseBasicParsing
+        Invoke-WebRequest "$basis/DesktopAppInstaller_Dependencies.zip" -OutFile (Join-Path $map 'deps.zip') -UseBasicParsing
+        $sig = Get-AuthenticodeSignature -LiteralPath $bundel
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw 'de handtekening van het gedownloade pakket klopt niet'
+        }
+        Expand-Archive -LiteralPath (Join-Path $map 'deps.zip') -DestinationPath (Join-Path $map 'deps') -Force
+        $arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { 'arm64' } 'x86' { 'x86' } default { 'x64' } }
+        $deps = @(Get-ChildItem -LiteralPath (Join-Path $map 'deps') -Recurse -Filter *.appx |
+            Where-Object { $_.Name -match "_$arch\.appx$" -or $_.DirectoryName -match "\\$arch$" } | ForEach-Object { $_.FullName })
+        Add-AppxPackage -Path $bundel -DependencyPath $deps -ForceApplicationShutdown
+        Write-Ok "winget bijgewerkt naar $(& winget --version)."
+        return $true
+    } catch {
+        Write-Let "winget bijwerken lukte niet: $($_.Exception.Message). Werk App Installer bij via de Microsoft Store."
+        return $false
+    } finally {
+        $ProgressPreference = $oudeVoortgang
+        Remove-Item -LiteralPath $map -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Is winget te oud voor dit pakket? Dan aanbieden om bij te werken; $true als dat gelukt is
+function script:Confirm-WingetBijwerken([string]$Naam) {
+    Write-Let "Deze versie van winget is te oud voor $Naam (de pakketbeschrijving is nieuwer dan winget kan lezen)."
+    if (-not (Read-JaNee 'winget nu bijwerken en het opnieuw proberen?')) { return $false }
+    return (Update-Winget)
+}
+
 # Installeert een winget-pakket, in de weergavetaal van Windows als dat kan: eerst een apart taalpakket
 # ($TaalId, bijv. 'Mozilla.Firefox.{taal}'), dan een installatiebestand voor die taal (--locale), anders
 # het gewone pakket (Chrome, ESET en 7-Zip hebben geen taalversies en volgen zelf de taal van Windows).
 # -1978335216 = APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER.
-function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId) {
+function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId, [switch]$Opnieuw) {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Let "$($Naam): winget ontbreekt. Installeer App Installer uit de Microsoft Store."
         return $false
@@ -1988,6 +2065,9 @@ function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId
         & winget install --id $Id -e --accept-package-agreements --accept-source-agreements
     }
     if ($LASTEXITCODE -eq 0) { Write-Ok "$Naam is geïnstalleerd."; return $true }
+    if ($LASTEXITCODE -eq $script:WingetTeOud -and -not $Opnieuw -and (Confirm-WingetBijwerken $Naam)) {
+        return (Install-WingetPakket -Id $Id -Naam $Naam -TaalId $TaalId -Opnieuw)
+    }
     Write-Let "$Naam installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven."
     return $false
 }
@@ -2118,12 +2198,9 @@ function Open-Backup {
 
     $pad = $script:Herstel
     if (-not $pad) {
-        if ($Gui) {
-            Add-Type -AssemblyName System.Windows.Forms
-            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-            $dlg.Description = 'Kies de back-upmap (Migratie_<pc>_<datum>) om terug te zetten'
-            if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { throw 'Geen back-upmap gekozen.' }
-            $pad = $dlg.SelectedPath
+        if ($script:GuiModus) {
+            $pad = [MigratieGui.Venster]::Map('Kies de back-upmap (Migratie_<pc>_<datum>) om terug te zetten')
+            if (-not $pad) { throw 'Geen back-upmap gekozen.' }
         } else {
             $pad = Read-Host '  Back-upmap (bijv. E:\Migratie_OUDEPC_20261014_0930)'
         }
@@ -2151,7 +2228,8 @@ function Open-Backup {
     New-Item -ItemType Directory -Force -Path $logMap | Out-Null
     $stempel = Get-Date -Format 'yyyyMMdd_HHmm'
     $script:HerstelLog = Join-Path $logMap "herstel_$stempel.log"
-    try { Start-Transcript -Path (Join-Path $logMap "transcript_$stempel.log") | Out-Null } catch { }
+    if ($script:GuiModus) { [MigratieGui.Venster]::LogBestand = Join-Path $logMap "transcript_$stempel.log" }
+    else { try { Start-Transcript -Path (Join-Path $logMap "transcript_$stempel.log") | Out-Null } catch { } }
 
     $script:Bron = $pad
     Write-Ok "Back-up: $pad"
@@ -2184,6 +2262,9 @@ function Restore-Programmas {
 
             Write-Host "  $($ids.Count) programma's installeren. Dit kan even duren; wat er al op staat wordt overgeslagen."
             & winget import -i $tmp --accept-package-agreements --accept-source-agreements --ignore-unavailable
+            if ($LASTEXITCODE -eq $script:WingetTeOud -and (Confirm-WingetBijwerken "een of meer programma's")) {
+                & winget import -i $tmp --accept-package-agreements --accept-source-agreements --ignore-unavailable
+            }
             if ($LASTEXITCODE -eq 0) { Write-Ok 'winget import klaar' }
             else { Write-Let "winget meldt fouten (code $LASTEXITCODE); zie de uitvoer hierboven." }
             Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
@@ -2212,9 +2293,9 @@ function Install-Eset {
     if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security staat er al op.'; return }
     Write-Host ''
     if (-not (Read-JaNee 'ESET Security (virusscanner) installeren?')) { return }
-    & winget install --id=ESET.Security -e --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security is geïnstalleerd. Activeer hem met je ESET HOME-account of licentiesleutel.' }
-    else { Write-Let "ESET Security installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven." }
+    if (Install-WingetPakket -Id 'ESET.Security' -Naam 'ESET Security') {
+        Write-Let 'Activeer ESET met je ESET HOME-account of licentiesleutel.'
+    }
 }
 
 function Restore-Instellingen {
@@ -2496,7 +2577,7 @@ function script:Import-WachtwoordCsv([hashtable]$B, $Csv) {
     if (-not (Test-Path -LiteralPath (Join-Path $B.Data 'First Run'))) {
         Write-Let "$($B.Naam) is op deze laptop nog niet eerder gestart."
         try { Start-Process -FilePath $B.Proces } catch { }
-        [void](Read-Host "  Doorloop de welkomstschermen van $($B.Naam) en druk dan op Enter")
+        Wait-Gebruiker "  Doorloop de welkomstschermen van $($B.Naam) en druk dan op Enter" "$($B.Naam) is op deze laptop nog niet eerder gestart. Doorloop eerst de welkomstschermen van $($B.Naam) en klik dan op OK."
     }
 
     Write-Host "  $($Csv.Name): $($B.Naam) wordt geopend en de import wordt automatisch gestart. Klik niet in het browservenster tot het klaar is."
@@ -2512,7 +2593,7 @@ function script:Import-WachtwoordCsv([hashtable]$B, $Csv) {
         Write-Host "  1. Het adres $($B.Ww) staat op je klembord. Plak het in de adresbalk van $($B.Naam)."
         Write-Host "  2. Kies 'Wachtwoorden importeren' en daarna dit bestand:"
         Write-Host "     $($Csv.FullName)" -ForegroundColor White
-        [void](Read-Host '  3. Druk op Enter als het importeren klaar is')
+        Wait-Gebruiker '  3. Druk op Enter als het importeren klaar is' "Importeer in $($B.Naam) het bestand $($Csv.FullName) en klik dan op OK."
     }
 }
 
@@ -2638,6 +2719,494 @@ function Show-HerstelMenu {
 }
 
 # ---------------------------------------------------------------------------
+# Venster (de standaard; -Cli geeft de tekstversie)
+# ---------------------------------------------------------------------------
+
+# Het venster draait op de UI-thread; de stappen in een eigen runspace, zodat het venster blijft reageren.
+# Alles wat tussen die twee threads gaat (meldingen, vragen, keuzelijsten) loopt via deze C#-klasse:
+# PowerShell-scriptblokken over threads heen zijn niet betrouwbaar.
+function Initialize-Gui {
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, System.Windows.Forms
+    if ('MigratieGui.Venster' -as [type]) { return }
+    $refs = @(
+        [System.Windows.Window], [System.Windows.Media.Brush], [System.Windows.Threading.Dispatcher],
+        [System.Xaml.XamlType], [System.Windows.Forms.Form], [psobject], [System.Text.RegularExpressions.Regex]
+    ) | ForEach-Object { $_.Assembly.Location }
+    Add-Type -ReferencedAssemblies $refs -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Management.Automation;
+using System.Management.Automation.Runspaces;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Documents;
+using System.Windows.Media;
+
+namespace MigratieGui
+{
+    public class Rij
+    {
+        public bool Kies { get; set; }
+        public string[] Waarden { get; set; }
+    }
+
+    public static class Venster
+    {
+        public static Window Hoofd;
+        public static RichTextBox Log;
+        public static TextBlock Status;
+        public static Button StopKnop;
+        public static List<UIElement> Bediening = new List<UIElement>();
+        public static string LogBestand;
+        static PowerShell huidig;
+        // Voortgangsregels van winget (spinners, balkjes) horen niet in het log
+        static readonly Regex Ruis = new Regex(@"^[\s\-\\|/]*$|[█▒]");
+
+        public static bool Bezig { get { return huidig != null; } }
+
+        public static void Schrijf(string tekst, string kleur)
+        {
+            if (tekst == null) return;
+            foreach (string ruw in tekst.Replace("\r\n", "\n").Split('\n'))
+            {
+                string regel = ruw.Substring(ruw.LastIndexOf('\r') + 1).TrimEnd();
+                if (regel.Length > 0 && Ruis.IsMatch(regel)) continue;
+                if (LogBestand != null)
+                {
+                    try { File.AppendAllText(LogBestand, regel + Environment.NewLine, new UTF8Encoding(false)); } catch { }
+                }
+                Brush kwast = Kleur(kleur);
+                bool vet = kleur == "White" || kleur == "Cyan";
+                Hoofd.Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    Paragraph p = new Paragraph(new Run(regel));
+                    p.Margin = new Thickness(0);
+                    if (kwast != null) p.Foreground = kwast;
+                    if (vet) p.FontWeight = FontWeights.SemiBold;
+                    Log.Document.Blocks.Add(p);
+                    Log.ScrollToEnd();
+                }));
+            }
+        }
+
+        static Brush Kleur(string kleur)
+        {
+            switch (kleur)
+            {
+                case "Green": return Brushes.ForestGreen;
+                case "Yellow": return Brushes.DarkGoldenrod;
+                case "Red": return Brushes.Firebrick;
+                case "Cyan": return Brushes.SteelBlue;
+                case "DarkGray": case "Gray": return Brushes.Gray;
+                default: return null;
+            }
+        }
+
+        public static bool JaNee(string vraag)
+        {
+            return (bool)Hoofd.Dispatcher.Invoke(new Func<object>(delegate
+            {
+                return MessageBox.Show(Hoofd, vraag, "Migratie-Assistent", MessageBoxButton.YesNo,
+                    MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
+            }));
+        }
+
+        public static void Melding(string tekst)
+        {
+            Hoofd.Dispatcher.Invoke(new Action(delegate
+            {
+                MessageBox.Show(Hoofd, tekst, "Migratie-Assistent", MessageBoxButton.OK, MessageBoxImage.Information);
+            }));
+        }
+
+        public static string Map(string omschrijving)
+        {
+            return (string)Hoofd.Dispatcher.Invoke(new Func<object>(delegate
+            {
+                using (System.Windows.Forms.FolderBrowserDialog d = new System.Windows.Forms.FolderBrowserDialog())
+                {
+                    d.Description = omschrijving;
+                    d.ShowNewFolderButton = true;
+                    return d.ShowDialog() == System.Windows.Forms.DialogResult.OK ? d.SelectedPath : null;
+                }
+            }));
+        }
+
+        // Keuzelijst met vinkjes; geeft de nummers van de aangevinkte rijen terug (leeg bij Annuleren)
+        public static int[] Kiezen(string titel, string[] kolommen, string[][] rijen, bool[] voorstel)
+        {
+            return (int[])Hoofd.Dispatcher.Invoke(new Func<object>(delegate
+            {
+                List<Rij> items = new List<Rij>();
+                for (int i = 0; i < rijen.Length; i++)
+                {
+                    Rij r = new Rij();
+                    r.Kies = voorstel != null && i < voorstel.Length && voorstel[i];
+                    r.Waarden = rijen[i];
+                    items.Add(r);
+                }
+
+                Window w = new Window();
+                w.Title = titel;
+                w.Owner = Hoofd;
+                w.Width = 860;
+                w.Height = 560;
+                w.WindowStartupLocation = WindowStartupLocation.CenterOwner;
+                w.FontFamily = Hoofd.FontFamily;
+
+                DataGrid g = new DataGrid();
+                g.AutoGenerateColumns = false;
+                g.CanUserAddRows = false;
+                g.HeadersVisibility = DataGridHeadersVisibility.Column;
+                g.GridLinesVisibility = DataGridGridLinesVisibility.Horizontal;
+                FrameworkElementFactory vinkje = new FrameworkElementFactory(typeof(CheckBox));
+                Binding b = new Binding("Kies");
+                b.Mode = BindingMode.TwoWay;
+                b.UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged;
+                vinkje.SetBinding(CheckBox.IsCheckedProperty, b);
+                vinkje.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+                DataTemplate sjabloon = new DataTemplate();
+                sjabloon.VisualTree = vinkje;
+                DataGridTemplateColumn kolom = new DataGridTemplateColumn();
+                kolom.Header = "Kies";
+                kolom.CellTemplate = sjabloon;
+                g.Columns.Add(kolom);
+                for (int c = 0; c < kolommen.Length; c++)
+                {
+                    DataGridTextColumn tk = new DataGridTextColumn();
+                    tk.Header = kolommen[c];
+                    tk.Binding = new Binding("Waarden[" + c + "]");
+                    tk.IsReadOnly = true;
+                    g.Columns.Add(tk);
+                }
+                g.ItemsSource = items;
+
+                StackPanel knoppen = new StackPanel();
+                knoppen.Orientation = Orientation.Horizontal;
+                knoppen.HorizontalAlignment = HorizontalAlignment.Right;
+                knoppen.Margin = new Thickness(0, 10, 0, 0);
+                knoppen.Children.Add(Knop("Alles", delegate { foreach (Rij r in items) r.Kies = true; g.Items.Refresh(); }));
+                knoppen.Children.Add(Knop("Niets", delegate { foreach (Rij r in items) r.Kies = false; g.Items.Refresh(); }));
+                if (voorstel != null)
+                {
+                    knoppen.Children.Add(Knop("Voorstel", delegate
+                    {
+                        for (int i = 0; i < items.Count; i++) items[i].Kies = i < voorstel.Length && voorstel[i];
+                        g.Items.Refresh();
+                    }));
+                }
+                Button ok = Knop("OK", delegate { w.DialogResult = true; });
+                ok.IsDefault = true;
+                Button annuleren = Knop("Annuleren", delegate { w.DialogResult = false; });
+                annuleren.IsCancel = true;
+                knoppen.Children.Add(ok);
+                knoppen.Children.Add(annuleren);
+
+                DockPanel dp = new DockPanel();
+                dp.Margin = new Thickness(12);
+                DockPanel.SetDock(knoppen, Dock.Bottom);
+                dp.Children.Add(knoppen);
+                dp.Children.Add(g);
+                w.Content = dp;
+
+                List<int> gekozen = new List<int>();
+                if (w.ShowDialog() == true)
+                {
+                    for (int i = 0; i < items.Count; i++) if (items[i].Kies) gekozen.Add(i);
+                }
+                return gekozen.ToArray();
+            }));
+        }
+
+        static Button Knop(string tekst, RoutedEventHandler klik)
+        {
+            Button b = new Button();
+            b.Content = tekst;
+            b.MinWidth = 90;
+            b.Margin = new Thickness(8, 0, 0, 0);
+            b.Padding = new Thickness(10, 4, 10, 4);
+            b.Click += klik;
+            return b;
+        }
+
+        // Voert een script uit in de achtergrond-runspace en zet de uitvoer in het log
+        public static void Start(Runspace rs, string script, string omschrijving)
+        {
+            if (huidig != null) return;
+            PowerShell ps = PowerShell.Create();
+            ps.Runspace = rs;
+            ps.AddScript(script);
+            ps.Streams.Information.DataAdded += delegate(object s, DataAddedEventArgs e)
+            {
+                InformationRecord r = ps.Streams.Information[e.Index];
+                HostInformationMessage h = r.MessageData as HostInformationMessage;
+                if (h != null) Schrijf(h.Message, h.ForegroundColor.HasValue ? h.ForegroundColor.Value.ToString() : null);
+                else if (r.MessageData != null) Schrijf(r.MessageData.ToString(), null);
+            };
+            ps.Streams.Warning.DataAdded += delegate(object s, DataAddedEventArgs e)
+            {
+                Schrijf("  [!]  " + ps.Streams.Warning[e.Index].Message, "Yellow");
+            };
+            ps.Streams.Error.DataAdded += delegate(object s, DataAddedEventArgs e)
+            {
+                Schrijf("  [X]  " + ps.Streams.Error[e.Index].ToString(), "Red");
+            };
+            PSDataCollection<PSObject> uit = new PSDataCollection<PSObject>();
+            uit.DataAdded += delegate(object s, DataAddedEventArgs e)
+            {
+                PSObject o = uit[e.Index];
+                if (o != null) Schrijf(o.ToString(), null);
+            };
+            ps.InvocationStateChanged += delegate(object s, PSInvocationStateChangedEventArgs e)
+            {
+                PSInvocationState st = e.InvocationStateInfo.State;
+                if (st != PSInvocationState.Completed && st != PSInvocationState.Failed && st != PSInvocationState.Stopped) return;
+                if (st == PSInvocationState.Failed && e.InvocationStateInfo.Reason != null)
+                    Schrijf("  [X]  " + e.InvocationStateInfo.Reason.Message, "Red");
+                if (st == PSInvocationState.Stopped) Schrijf("  [!]  Gestopt.", "Yellow");
+                huidig = null;
+                ZetBezig(false, null);
+            };
+            huidig = ps;
+            ZetBezig(true, omschrijving);
+            ps.BeginInvoke<PSObject, PSObject>((PSDataCollection<PSObject>)null, uit);
+        }
+
+        public static void Stop()
+        {
+            PowerShell ps = huidig;
+            if (ps != null) ps.BeginStop(null, null);
+        }
+
+        static void ZetBezig(bool bezig, string omschrijving)
+        {
+            Hoofd.Dispatcher.BeginInvoke(new Action(delegate
+            {
+                foreach (UIElement u in Bediening) u.IsEnabled = !bezig;
+                if (StopKnop != null) StopKnop.IsEnabled = bezig;
+                if (Status != null) Status.Text = bezig ? "Bezig: " + omschrijving : "Klaar. Kies een stap.";
+            }));
+        }
+
+        [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+        [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int stand);
+
+        // Het consolevenster waaruit het script gestart is, minimaliseren (6) of terugzetten (9)
+        public static void Console(bool tonen)
+        {
+            IntPtr h = GetConsoleWindow();
+            if (h != IntPtr.Zero) ShowWindow(h, tonen ? 9 : 6);
+        }
+    }
+}
+'@
+}
+
+# Alle knoppen in het venster die een stap starten (Tag = de PowerShell-opdracht)
+function Get-StapKnoppen($Element) {
+    foreach ($kind in [System.Windows.LogicalTreeHelper]::GetChildren($Element)) {
+        if ($kind -is [System.Windows.Controls.Button] -and $kind.Tag) { $kind }
+        if ($kind -is [System.Windows.DependencyObject]) { Get-StapKnoppen $kind }
+    }
+}
+
+function Start-Gui([string]$HerstelMap) {
+    Initialize-Gui
+    $venster = [Windows.Markup.XamlReader]::Parse($script:GuiXaml)
+    [MigratieGui.Venster]::Hoofd = $venster
+    [MigratieGui.Venster]::Log = $venster.FindName('Log')
+    $venster.FindName('Log').Document.Blocks.Clear()
+    [MigratieGui.Venster]::Status = $venster.FindName('Status')
+    [MigratieGui.Venster]::StopKnop = $venster.FindName('Stop')
+
+    # De achtergrond-runspace: STA, want het klembord en UI Automation vragen daarom
+    $iss = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $iss.ExecutionPolicy = [Microsoft.PowerShell.ExecutionPolicy]::Bypass
+    $script:GuiRunspace = [Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($iss)
+    $script:GuiRunspace.ApartmentState = 'STA'
+    $script:GuiRunspace.ThreadOptions = 'ReuseThread'
+    $script:GuiRunspace.Open()
+
+    # Daarin het script zelf laden, met dezelfde parameters
+    $script:GuiLaden = ". '{0}' -Worker" -f ($PSCommandPath -replace "'", "''")
+    if ($Doel) { $script:GuiLaden += " -Doel '{0}'" -f ($Doel -replace "'", "''") }
+    if ($HerstelMap) { $script:GuiLaden += " -Herstel '{0}'" -f ($HerstelMap -replace "'", "''") }
+    if ($NaarLinux) { $script:GuiLaden += ' -NaarLinux' }
+    $script:GuiHerstelMap = $HerstelMap
+
+    foreach ($knop in @(Get-StapKnoppen $venster)) {
+        [MigratieGui.Venster]::Bediening.Add($knop)
+        # Naam voor schermlezers (en tests): de titel van de knop
+        [System.Windows.Automation.AutomationProperties]::SetName($knop, @($knop.Content.Children)[0].Text)
+        [System.Windows.Automation.AutomationProperties]::SetAutomationId($knop, $knop.Tag)
+        $knop.Add_Click({
+            $titel = @($this.Content.Children)[0].Text
+            [MigratieGui.Venster]::Schrijf('', $null)
+            [MigratieGui.Venster]::Start($script:GuiRunspace, "Invoke-Stap { $($this.Tag) }", $titel)
+        })
+    }
+    $venster.FindName('Stop').Add_Click({ [MigratieGui.Venster]::Stop() })
+    $venster.Add_Closing({
+        if ([MigratieGui.Venster]::Bezig) {
+            if ([MigratieGui.Venster]::JaNee('Er loopt nog een stap. Toch afsluiten?')) { [MigratieGui.Venster]::Stop() }
+            else { $_.Cancel = $true }
+        }
+    })
+    if ($HerstelMap) { $venster.FindName('Tabs').SelectedIndex = 1 }
+
+    $venster.Add_ContentRendered({
+        [MigratieGui.Venster]::Schrijf('Migratie-Assistent: kies links wat je wilt doen en klik op een stap.', 'Cyan')
+        if ($script:GuiHerstelMap) { [MigratieGui.Venster]::Schrijf("Herstellen vanuit: $script:GuiHerstelMap", $null) }
+        [MigratieGui.Venster]::Start($script:GuiRunspace, $script:GuiLaden, 'script laden')
+    })
+
+    [MigratieGui.Venster]::Console($false)
+    try {
+        [void]$venster.ShowDialog()
+    } finally {
+        [MigratieGui.Venster]::Console($true)
+        try {
+            $ps = [powershell]::Create()
+            $ps.Runspace = $script:GuiRunspace
+            [void]$ps.AddScript('Save-Rapport').Invoke()
+        } catch { }
+        $script:GuiRunspace.Dispose()
+    }
+}
+
+$script:GuiXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Migratie-Assistent" Width="1060" Height="760" MinWidth="860" MinHeight="580"
+        WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13" Background="#F3F4F6">
+  <Window.Resources>
+    <Style x:Key="Stap" TargetType="Button">
+      <Setter Property="Margin" Value="0,0,12,12"/>
+      <Setter Property="Padding" Value="14,10"/>
+      <Setter Property="Width" Value="260"/>
+      <Setter Property="MinHeight" Value="64"/>
+      <Setter Property="HorizontalContentAlignment" Value="Left"/>
+      <Setter Property="VerticalContentAlignment" Value="Top"/>
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="BorderBrush" Value="#D1D5DB"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style x:Key="Titel" TargetType="TextBlock">
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+    <Style x:Key="Klein" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#6B7280"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="Margin" Value="0,2,0,0"/>
+    </Style>
+    <Style x:Key="Kop" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="22"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,4"/>
+    </Style>
+    <Style x:Key="Uitleg" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#4B5563"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="Margin" Value="0,0,0,16"/>
+    </Style>
+    <Style x:Key="Groep" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,4,0,10"/>
+    </Style>
+    <Style TargetType="TabItem">
+      <Setter Property="Padding" Value="18,12"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="MinWidth" Value="170"/>
+    </Style>
+  </Window.Resources>
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*" MinHeight="260"/>
+      <RowDefinition Height="8"/>
+      <RowDefinition Height="230" MinHeight="100"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TabControl x:Name="Tabs" TabStripPlacement="Left" Background="White" BorderBrush="#D1D5DB">
+      <TabItem Header="Back-up maken">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="22,18">
+            <TextBlock Style="{StaticResource Kop}" Text="Back-up maken"/>
+            <TextBlock Style="{StaticResource Uitleg}" Text="Op de oude pc. Bij de eerste stap kies je waar de back-up komt: een externe schijf of NAS. Er wordt alleen gekopieerd; op deze pc wordt niets verwijderd."/>
+            <WrapPanel>
+              <Button Style="{StaticResource Stap}" Tag="Invoke-Alles"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Alles achter elkaar"/><TextBlock Style="{StaticResource Klein}" Text="Alle stappen hieronder in één keer"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Export-Programmas"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Programma's inventariseren"/><TextBlock Style="{StaticResource Klein}" Text="Lijst van wat er geïnstalleerd is, en winget-export"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Backup-Browsers"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Browsers"/><TextBlock Style="{StaticResource Klein}" Text="Bladwijzers, instellingen, extensies, Firefox-profiel"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Export-Wachtwoorden"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Wachtwoorden exporteren"/><TextBlock Style="{StaticResource Klein}" Text="Automatisch uit Chrome, Edge en andere; jij bevestigt met je pincode"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Backup-Instellingen"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Programma-instellingen"/><TextBlock Style="{StaticResource Klein}" Text="Outlook, Office, VS Code, eM Client, ..."/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Invoke-HomeScan"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Home-map scannen"/><TextBlock Style="{StaticResource Klein}" Text="Hoe groot is wat, en wat staat er in OneDrive"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Copy-HomeMappen"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Home-map kopiëren"/><TextBlock Style="{StaticResource Klein}" Text="Documenten, Bureaublad, Afbeeldingen, ... met robocopy"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Open-Rapport"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Rapport openen"/><TextBlock Style="{StaticResource Klein}" Text="Overzicht van de back-up in de browser"/></StackPanel></Button>
+            </WrapPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="Herstellen">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="22,18">
+            <TextBlock Style="{StaticResource Kop}" Text="Herstellen"/>
+            <TextBlock Style="{StaticResource Uitleg}" Text="Zet een back-up terug op de nieuwe laptop. Bij de eerste stap kies je de back-upmap (Migratie_&lt;pc&gt;_&lt;datum&gt;)."/>
+            <TextBlock Style="{StaticResource Groep}" Text="Windows: deze laptop"/>
+            <WrapPanel>
+              <Button Style="{StaticResource Stap}" Tag="Invoke-HerstelAlles"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Alles achter elkaar"/><TextBlock Style="{StaticResource Klein}" Text="Alle herstelstappen in één keer"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Restore-Programmas"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Programma's installeren"/><TextBlock Style="{StaticResource Klein}" Text="Met winget; je kiest welke"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Restore-Instellingen"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Programma-instellingen terugzetten"/><TextBlock Style="{StaticResource Klein}" Text="Wat bij de back-up is meegenomen"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Restore-Browsers"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Bladwijzers en Firefox-profiel"/><TextBlock Style="{StaticResource Klein}" Text="Terug in de browsers op deze laptop"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Restore-Bestanden"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Bestanden terugzetten"/><TextBlock Style="{StaticResource Klein}" Text="Nieuwere bestanden op deze laptop blijven staan"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Restore-Wachtwoorden"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Wachtwoorden importeren"/><TextBlock Style="{StaticResource Klein}" Text="Automatisch in Chrome, Edge en andere"/></StackPanel></Button>
+            </WrapPanel>
+            <TextBlock Style="{StaticResource Groep}" Text="Linux" Margin="0,14,0,10"/>
+            <WrapPanel>
+              <Button Style="{StaticResource Stap}" Tag="Export-LinuxPlan"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Back-up klaarmaken voor Linux"/><TextBlock Style="{StaticResource Klein}" Text="Op de oude pc: programma's vertalen naar Linux-apps en het herstelscript klaarzetten"/></StackPanel></Button>
+            </WrapPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="Configureren">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="22,18">
+            <TextBlock Style="{StaticResource Kop}" Text="Configureren"/>
+            <TextBlock Style="{StaticResource Uitleg}" Text="Een (nieuwe) pc klaarmaken: software installeren in de taal van Windows, en Windows instellen met WinUtil."/>
+            <WrapPanel>
+              <Button Style="{StaticResource Stap}" Tag="Install-Software"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Software installeren"/><TextBlock Style="{StaticResource Klein}" Text="ESET, browsers, 7-Zip, VLC, Acrobat Reader, Notepad++, AnyDesk"/></StackPanel></Button>
+              <Button Style="{StaticResource Stap}" Tag="Start-WinUtil"><StackPanel><TextBlock Style="{StaticResource Titel}" Text="Chris Titus WinUtil"/><TextBlock Style="{StaticResource Klein}" Text="Windows-instellingen, tweaks en updates (eigen venster, als beheerder)"/></StackPanel></Button>
+            </WrapPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
+
+    <GridSplitter Grid.Row="1" Height="8" HorizontalAlignment="Stretch" Background="Transparent" ResizeBehavior="PreviousAndNext"/>
+
+    <Border Grid.Row="2" Background="White" BorderBrush="#D1D5DB" BorderThickness="1">
+      <RichTextBox x:Name="Log" IsReadOnly="True" BorderThickness="0" Padding="6" FontFamily="Consolas" FontSize="12"
+                   VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+    </Border>
+
+    <DockPanel Grid.Row="3" Margin="0,10,0,0" LastChildFill="True">
+      <Button x:Name="Stop" DockPanel.Dock="Right" Content="Stoppen" IsEnabled="False" Padding="16,4" MinWidth="90"/>
+      <TextBlock x:Name="Status" VerticalAlignment="Center" Foreground="#374151" Text="Bezig met opstarten..."/>
+    </DockPanel>
+  </Grid>
+</Window>
+'@
+
+# ---------------------------------------------------------------------------
 # Menu
 # ---------------------------------------------------------------------------
 
@@ -2656,6 +3225,11 @@ function Invoke-Alles {
     Invoke-Stap { Invoke-HomeScan }
     Invoke-Stap { Copy-HomeMappen }
     if ($NaarLinux) { Invoke-Stap { Export-LinuxPlan } }
+}
+
+function Open-Rapport {
+    if ($script:Run) { Invoke-Item -LiteralPath (Join-Path $script:Run 'rapport.html') }
+    else { Write-Let 'Er is nog geen rapport; voer eerst een stap uit.' }
 }
 
 function Show-HoofdMenu {
@@ -2727,10 +3301,7 @@ function Show-BackupMenu {
             '5' { Invoke-Stap { Backup-Instellingen } }
             '6' { Invoke-Stap { Invoke-HomeScan } }
             '7' { Invoke-Stap { Copy-HomeMappen } }
-            '8' {
-                if ($script:Run) { Invoke-Item (Join-Path $script:Run 'rapport.html') }
-                else { Write-Let 'Er is nog geen rapport; voer eerst een stap uit.' }
-            }
+            '8' { Open-Rapport }
             'q' { return }
         }
     }
@@ -2740,10 +3311,28 @@ function Show-BackupMenu {
 # Start
 # ---------------------------------------------------------------------------
 
+# In de achtergrond-runspace van het venster: alleen de functies laden
+if ($Worker) { $script:GuiModus = $true; return }
+
 if ($env:OS -ne 'Windows_NT') { Write-Error 'Dit script draait alleen op Windows.'; exit 1 }
 
 # Gestart vanuit een back-upmap (het script kopieert zichzelf daarheen)? Dan ligt herstellen voor de hand.
-if (-not $Herstel -and -not $Doel -and $PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'HERSTELLEN.txt'))) {
+$inBackup = -not $Herstel -and -not $Doel -and $PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'HERSTELLEN.txt'))
+
+# Standaard het venster; de tekstversie met -Cli, met -Alles, of als het script niet als bestand draait
+if (-not $Cli -and -not $Alles -and $PSCommandPath) {
+    $herstelMap = $Herstel
+    if ($inBackup) {
+        Add-Type -AssemblyName PresentationFramework
+        $antw = [System.Windows.MessageBox]::Show("Dit script staat in een back-upmap ($PSScriptRoot). Daaruit herstellen op deze laptop?",
+            'Migratie-Assistent', 'YesNo', 'Question')
+        if ($antw -eq 'Yes') { $herstelMap = $PSScriptRoot }
+    }
+    Start-Gui $herstelMap
+    return
+}
+
+if ($inBackup) {
     if (Read-JaNee "Dit script staat in een back-upmap ($PSScriptRoot). Daaruit herstellen op deze laptop?") { $Herstel = $PSScriptRoot }
 }
 
