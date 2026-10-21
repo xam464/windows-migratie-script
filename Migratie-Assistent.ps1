@@ -1986,11 +1986,56 @@ function Get-SshSessies {
 # Configureren
 # ---------------------------------------------------------------------------
 
+# winget-code voor 'de pakketbeschrijving is nieuwer dan deze winget kan lezen': op oudere Windows 10-
+# installaties is App Installer vaak te oud voor nieuwe pakketten (zoals ESET.Security).
+$script:WingetTeOud = -1978335225   # 0x8A150007 APPINSTALLER_CLI_ERROR_UNSUPPORTED_MANIFESTVERSION
+
+# Werkt winget (App Installer) bij met de nieuwste release van github.com/microsoft/winget-cli: het
+# pakket van Microsoft plus de afhankelijkheden voor deze processorarchitectuur.
+function Update-Winget {
+    Write-Host '  winget bijwerken met de nieuwste versie van github.com/microsoft/winget-cli...'
+    $map = Join-Path $env:TEMP 'migratie-winget'
+    New-Item -ItemType Directory -Force -Path $map | Out-Null
+    $oudeVoortgang = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $basis = 'https://github.com/microsoft/winget-cli/releases/latest/download'
+        $bundel = Join-Path $map 'appinstaller.msixbundle'
+        Invoke-WebRequest "$basis/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile $bundel -UseBasicParsing
+        Invoke-WebRequest "$basis/DesktopAppInstaller_Dependencies.zip" -OutFile (Join-Path $map 'deps.zip') -UseBasicParsing
+        $sig = Get-AuthenticodeSignature -LiteralPath $bundel
+        if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw 'de handtekening van het gedownloade pakket klopt niet'
+        }
+        Expand-Archive -LiteralPath (Join-Path $map 'deps.zip') -DestinationPath (Join-Path $map 'deps') -Force
+        $arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'ARM64' { 'arm64' } 'x86' { 'x86' } default { 'x64' } }
+        $deps = @(Get-ChildItem -LiteralPath (Join-Path $map 'deps') -Recurse -Filter *.appx |
+            Where-Object { $_.Name -match "_$arch\.appx$" -or $_.DirectoryName -match "\\$arch$" } | ForEach-Object { $_.FullName })
+        Add-AppxPackage -Path $bundel -DependencyPath $deps -ForceApplicationShutdown
+        Write-Ok "winget bijgewerkt naar $(& winget --version)."
+        return $true
+    } catch {
+        Write-Let "winget bijwerken lukte niet: $($_.Exception.Message). Werk App Installer bij via de Microsoft Store."
+        return $false
+    } finally {
+        $ProgressPreference = $oudeVoortgang
+        Remove-Item -LiteralPath $map -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Is winget te oud voor dit pakket? Dan aanbieden om bij te werken; $true als dat gelukt is
+function script:Confirm-WingetBijwerken([string]$Naam) {
+    Write-Let "Deze versie van winget is te oud voor $Naam (de pakketbeschrijving is nieuwer dan winget kan lezen)."
+    if (-not (Read-JaNee 'winget nu bijwerken en het opnieuw proberen?')) { return $false }
+    return (Update-Winget)
+}
+
 # Installeert een winget-pakket, in de weergavetaal van Windows als dat kan: eerst een apart taalpakket
 # ($TaalId, bijv. 'Mozilla.Firefox.{taal}'), dan een installatiebestand voor die taal (--locale), anders
 # het gewone pakket (Chrome, ESET en 7-Zip hebben geen taalversies en volgen zelf de taal van Windows).
 # -1978335216 = APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER.
-function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId) {
+function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId, [switch]$Opnieuw) {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Let "$($Naam): winget ontbreekt. Installeer App Installer uit de Microsoft Store."
         return $false
@@ -2013,6 +2058,9 @@ function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId
         & winget install --id $Id -e --accept-package-agreements --accept-source-agreements
     }
     if ($LASTEXITCODE -eq 0) { Write-Ok "$Naam is geïnstalleerd."; return $true }
+    if ($LASTEXITCODE -eq $script:WingetTeOud -and -not $Opnieuw -and (Confirm-WingetBijwerken $Naam)) {
+        return (Install-WingetPakket -Id $Id -Naam $Naam -TaalId $TaalId -Opnieuw)
+    }
     Write-Let "$Naam installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven."
     return $false
 }
@@ -2207,6 +2255,9 @@ function Restore-Programmas {
 
             Write-Host "  $($ids.Count) programma's installeren. Dit kan even duren; wat er al op staat wordt overgeslagen."
             & winget import -i $tmp --accept-package-agreements --accept-source-agreements --ignore-unavailable
+            if ($LASTEXITCODE -eq $script:WingetTeOud -and (Confirm-WingetBijwerken "een of meer programma's")) {
+                & winget import -i $tmp --accept-package-agreements --accept-source-agreements --ignore-unavailable
+            }
             if ($LASTEXITCODE -eq 0) { Write-Ok 'winget import klaar' }
             else { Write-Let "winget meldt fouten (code $LASTEXITCODE); zie de uitvoer hierboven." }
             Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
@@ -2235,9 +2286,9 @@ function Install-Eset {
     if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security staat er al op.'; return }
     Write-Host ''
     if (-not (Read-JaNee 'ESET Security (virusscanner) installeren?')) { return }
-    & winget install --id=ESET.Security -e --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security is geïnstalleerd. Activeer hem met je ESET HOME-account of licentiesleutel.' }
-    else { Write-Let "ESET Security installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven." }
+    if (Install-WingetPakket -Id 'ESET.Security' -Naam 'ESET Security') {
+        Write-Let 'Activeer ESET met je ESET HOME-account of licentiesleutel.'
+    }
 }
 
 function Restore-Instellingen {
@@ -3003,7 +3054,7 @@ function Start-Gui([string]$HerstelMap) {
 
     $venster.Add_ContentRendered({
         [MigratieGui.Venster]::Schrijf('Migratie-Assistent: kies links wat je wilt doen en klik op een stap.', 'Cyan')
-        if ($script:GuiHerstelMap) { [MigratieGui.Venster]::Schrijf("Back-up gevonden naast het script: $script:GuiHerstelMap", $null) }
+        if ($script:GuiHerstelMap) { [MigratieGui.Venster]::Schrijf("Herstellen vanuit: $script:GuiHerstelMap", $null) }
         [MigratieGui.Venster]::Start($script:GuiRunspace, $script:GuiLaden, 'script laden')
     })
 
