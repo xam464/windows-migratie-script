@@ -2083,13 +2083,26 @@ function script:Install-WingetPakket([string]$Id, [string]$Naam, [string]$TaalId
     # Geen installatiebestand in deze taal (winget show zegt dat niet betrouwbaar vooraf): dan het gewone
     if ($LASTEXITCODE -eq -1978335216 -and $poging -contains '--locale') {
         Write-Host "  Geen aparte versie in $($cultuur.Name); de gewone versie volgt de taal van Windows."
-        & winget install --id $Id -e --accept-package-agreements --accept-source-agreements
+        $poging = @('--id', $Id, '-e')
+        & winget install @poging --accept-package-agreements --accept-source-agreements
     }
     if ($LASTEXITCODE -eq 0) { Write-Ok "$Naam is geïnstalleerd."; return $true }
     if ($LASTEXITCODE -eq $script:WingetTeOud -and -not $Opnieuw -and (Confirm-WingetBijwerken $Naam)) {
         return (Install-WingetPakket -Id $Id -Naam $Naam -TaalId $TaalId -Opnieuw)
     }
-    Write-Let "$Naam installeren is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven."
+
+    # Het stille installatieprogramma kan mislukken waar het gewone wel werkt (ESET op Windows 11 26H2 gaf
+    # exitcode 1013 met --silent). Dan aanbieden het met het eigen venster van het programma te proberen.
+    Write-Let "Het installeren van $Naam is mislukt (winget-code $LASTEXITCODE); zie de uitvoer hierboven."
+    if (-not (Read-JaNee "$Naam opnieuw installeren met het eigen installatievenster van $($Naam)? Daarin zie je ook waarom het eventueel misgaat.")) {
+        return $false
+    }
+    & winget install @poging --interactive --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -eq -1978335216 -and $poging -contains '--locale') {
+        & winget install --id $Id -e --interactive --accept-package-agreements --accept-source-agreements
+    }
+    if ($LASTEXITCODE -eq 0) { Write-Ok "$Naam is geïnstalleerd."; return $true }
+    Write-Let "Ook met het installatievenster is $Naam niet geïnstalleerd (winget-code $LASTEXITCODE)."
     return $false
 }
 
