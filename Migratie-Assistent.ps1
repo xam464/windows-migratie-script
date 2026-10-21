@@ -1996,6 +1996,23 @@ function Get-SshSessies {
 # winget-code voor 'de pakketbeschrijving is nieuwer dan deze winget kan lezen': op oudere Windows 10-
 # installaties is App Installer vaak te oud voor nieuwe pakketten (zoals ESET.Security).
 $script:WingetTeOud = -1978335225   # 0x8A150007 APPINSTALLER_CLI_ERROR_UNSUPPORTED_MANIFESTVERSION
+# Pakketten in winget-pkgs gebruiken pakketbeschrijving 1.10 (ESET.Security bijvoorbeeld); oudere winget leest die niet
+$script:WingetMinimaal = [version]'1.10'
+
+# De versie van winget (bijv. 1.29.380), of $null als die niet te bepalen is
+function script:Get-WingetVersie {
+    try { $v = "$(& winget --version 2>$null)" } catch { return $null }
+    if ($v -match '(\d+\.\d+(\.\d+)?)') { return [version]$Matches[1] }
+    return $null
+}
+
+# Vóór het installeren: is winget nieuw genoeg? Zo niet, aanbieden om bij te werken
+function script:Confirm-WingetActueel {
+    $v = Get-WingetVersie
+    if (-not $v -or $v -ge $script:WingetMinimaal) { return }
+    Write-Let "winget is versie $v. Veel pakketten (zoals ESET) hebben minstens versie $script:WingetMinimaal nodig."
+    if (Read-JaNee 'winget nu bijwerken?') { [void](Update-Winget) }
+}
 
 # Werkt winget (App Installer) bij met de nieuwste release van github.com/microsoft/winget-cli: het
 # pakket van Microsoft plus de afhankelijkheden voor deze processorarchitectuur.
@@ -2020,7 +2037,11 @@ function Update-Winget {
         $deps = @(Get-ChildItem -LiteralPath (Join-Path $map 'deps') -Recurse -Filter *.appx |
             Where-Object { $_.Name -match "_$arch\.appx$" -or $_.DirectoryName -match "\\$arch$" } | ForEach-Object { $_.FullName })
         Add-AppxPackage -Path $bundel -DependencyPath $deps -ForceApplicationShutdown
-        Write-Ok "winget bijgewerkt naar $(& winget --version)."
+        $nieuw = Get-WingetVersie
+        if (-not $nieuw -or $nieuw -lt $script:WingetMinimaal) {
+            throw "na het installeren is winget nog steeds versie $nieuw"
+        }
+        Write-Ok "winget bijgewerkt naar versie $nieuw."
         return $true
     } catch {
         Write-Let "winget bijwerken lukte niet: $($_.Exception.Message). Werk App Installer bij via de Microsoft Store."
@@ -2092,6 +2113,7 @@ function Install-Software {
         Write-Let 'winget ontbreekt. Installeer of update App Installer uit de Microsoft Store en probeer het opnieuw.'
         return
     }
+    Confirm-WingetActueel
     Write-Host '  Kijken wat er al op staat...'
     $items = @(foreach ($s in $script:Software) {
         [pscustomobject]@{ Groep = $s.Groep; Naam = $s.Naam; Status = $(if (Test-WingetPakket $s) { 'staat erop' } else { '' }); Software = $s }
@@ -2260,6 +2282,7 @@ function Restore-Programmas {
             $tmp = Join-Path $env:TEMP 'migratie-winget.json'
             [IO.File]::WriteAllText($tmp, ($data | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding $false))
 
+            Confirm-WingetActueel
             Write-Host "  $($ids.Count) programma's installeren. Dit kan even duren; wat er al op staat wordt overgeslagen."
             & winget import -i $tmp --accept-package-agreements --accept-source-agreements --ignore-unavailable
             if ($LASTEXITCODE -eq $script:WingetTeOud -and (Confirm-WingetBijwerken "een of meer programma's")) {
@@ -2293,6 +2316,7 @@ function Install-Eset {
     if ($LASTEXITCODE -eq 0) { Write-Ok 'ESET Security staat er al op.'; return }
     Write-Host ''
     if (-not (Read-JaNee 'ESET Security (virusscanner) installeren?')) { return }
+    Confirm-WingetActueel
     if (Install-WingetPakket -Id 'ESET.Security' -Naam 'ESET Security') {
         Write-Let 'Activeer ESET met je ESET HOME-account of licentiesleutel.'
     }
